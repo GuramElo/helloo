@@ -3,797 +3,189 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HLS Player - Shaka Player</title>
-
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.7/shaka-player.ui.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.7/controls.min.css">
-
+    <title>hls.js Custom Controls (Manual Subtitles)</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 20px;
+            background: #f4f4f4;
         }
-
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-
-        .header {
-            text-align: center;
-            color: white;
-            margin-bottom: 30px;
-        }
-
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-
-        .player-wrapper {
-            background: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-            margin-bottom: 30px;
-        }
-
         #video-container {
-            position: relative;
             width: 100%;
-            padding-top: 56.25%; /* 16:9 Aspect Ratio */
+            max-width: 800px;
+            margin: 0 auto;
             background: #000;
         }
-
-        #video {
-            position: absolute;
-            top: 0;
-            left: 0;
+        video {
             width: 100%;
-            height: 100%;
-        }
-
-        .controls-panel {
-            background: white;
-            border-radius: 12px;
-            padding: 25px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
-
-        .control-group {
-            margin-bottom: 25px;
-        }
-
-        .control-group:last-child {
-            margin-bottom: 0;
-        }
-
-        .control-group label {
             display: block;
-            font-weight: 600;
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 1em;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
         }
-
-        .control-group label::before {
-            content: '';
-            display: inline-block;
-            width: 4px;
-            height: 14px;
-            background: #667eea;
-            margin-right: 8px;
-            vertical-align: middle;
+        /* Style native captions */
+        video::cue {
+            background-color: rgba(0, 0, 0, 0.75);
+            color: white;
+            font-size: 1.1rem;
         }
-
-        select {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            font-size: 1em;
-            background: white;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            appearance: none;
-            background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
-            background-repeat: no-repeat;
-            background-position: right 10px center;
-            background-size: 20px;
-            padding-right: 40px;
-        }
-
-        select:hover {
-            border-color: #667eea;
-        }
-
-        select:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-
-        /* --- NEW STYLES FOR SUBTITLE INPUT --- */
-        .input-button-group {
+        .custom-controls {
+            padding: 10px;
+            background: #222;
+            color: white;
             display: flex;
-            gap: 10px;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        .control-group {
+            display: flex;
             align-items: center;
-        }
-
-        .input-button-group input {
-            flex-grow: 1;
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            font-size: 1em;
-            background: white;
-            transition: all 0.3s ease;
-        }
-
-        .input-button-group input:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-
-        .input-button-group button {
-            flex-shrink: 0;
-            padding: 12px 20px;
-        }
-        /* --- END NEW STYLES --- */
-
-        .info-panel {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 12px;
-            padding: 25px;
-            margin-top: 30px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
-
-        .info-panel h3 {
-            margin-bottom: 15px;
-            font-size: 1.3em;
-        }
-
-        .info-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-        }
-
-        .info-item {
-            background: rgba(255,255,255,0.1);
-            padding: 15px;
-            border-radius: 8px;
-            backdrop-filter: blur(10px);
-        }
-
-        .info-item .label {
-            font-size: 0.85em;
-            opacity: 0.9;
-            margin-bottom: 5px;
-        }
-
-        .info-item .value {
-            font-size: 1.2em;
-            font-weight: 600;
-        }
-
-        .button-group {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
-        }
-
-        button {
-            padding: 12px 24px;
-            border: none;
-            border-radius: 8px;
-            font-size: 1em;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .btn-primary {
-            background: #667eea;
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background: #5568d3;
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-
-        .btn-secondary {
-            background: #e0e0e0;
-            color: #333;
-        }
-
-        .btn-secondary:hover {
-            background: #d0d0d0;
-            transform: translateY(-2px);
-        }
-
-        .status-bar {
-            background: #f5f5f5;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 20px;
-            font-family: 'Courier New', monospace;
-            font-size: 0.9em;
-            color: #666;
-        }
-
-        .status-bar .status-item {
-            margin-bottom: 5px;
-        }
-
-        .status-bar .status-item:last-child {
-            margin-bottom: 0;
-        }
-
-        .status-indicator {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 8px;
-            animation: pulse 2s infinite;
-        }
-
-        .status-indicator.loading {
-            background: #ffa500;
-        }
-
-        .status-indicator.playing {
-            background: #4caf50;
-        }
-
-        .status-indicator.error {
-            background: #f44336;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        @media (max-width: 768px) {
-            .header h1 {
-                font-size: 1.8em;
-            }
-
-            .controls-panel {
-                padding: 20px;
-            }
-
-            .info-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        /* Shaka Player Customization */
-        .shaka-video-container {
-            background: #000;
-        }
-
-        .shaka-controls-button-panel {
-            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+            gap: 5px;
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <div class="header">
-        <h1>🎬 Advanced HLS Player</h1>
-        <p>Multi-quality adaptive streaming with audio & subtitle selection</p>
-    </div>
 
-    <div class="player-wrapper">
-        <div id="video-container" data-shaka-player-container>
-            <video id="video"
-                   data-shaka-player
-                   autoplay
-                   poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'%3E%3Crect fill='%23000' width='1280' height='720'/%3E%3C/svg%3E">
-            </video>
-        </div>
-    </div>
+    <h1>hls.js Custom Controls Demo (Manual Subtitles)</h1>
 
-    <div class="controls-panel">
-        <div class="control-group">
-            <label for="quality-select">🎥 Video Quality</label>
-            <select id="quality-select">
-                <option value="auto">Auto (Adaptive)</option>
-            </select>
-        </div>
-
-        <div class="control-group">
-            <label for="audio-select">🔊 Audio Track</label>
-            <select id="audio-select">
-                <option value="">No audio tracks available</option>
-            </select>
-        </div>
-
-        <div class="control-group">
-            <label for="subtitle-select">💬 Subtitles</label>
-            <select id="subtitle-select">
-                <option value="off">Off</option>
-            </select>
-        </div>
-
-        <div class="control-group">
-            <label for="subtitle-url-input">🔗 Load External Subtitle</label>
-            <div class="input-button-group">
-                <input type="url" id="subtitle-url-input" placeholder="Enter .vtt subtitle URL...">
-                <button class="btn-secondary" onclick="playerController.loadExternalSubtitle()">Load</button>
-            </div>
-        </div>
-        <div class="button-group">
-            <button class="btn-primary" onclick="playerController.togglePlayPause()">⏯ Play/Pause</button>
-            <button class="btn-primary" onclick="playerController.toggleFullscreen()">⛶ Fullscreen</button>
-            <button class="btn-secondary" onclick="playerController.reload()">🔄 Reload</button>
-            <button class="btn-secondary" onclick="playerController.showStats()">📊 Stats</button>
-        </div>
-
-        <div class="status-bar">
-            <div class="status-item">
-                <span class="status-indicator loading" id="status-indicator"></span>
-                <span id="status-text">Initializing player...</span>
-            </div>
-            <div class="status-item" id="current-quality">Quality: --</div>
-            <div class="status-item" id="current-bitrate">Bitrate: --</div>
-            <div class="status-item" id="buffer-info">Buffer: --</div>
-        </div>
-    </div>
-
-    <div class="info-panel">
-        <h3>📈 Playback Information</h3>
-        <div class="info-grid">
-            <div class="info-item">
-                <div class="label">Current Quality</div>
-                <div class="value" id="info-quality">--</div>
-            </div>
-            <div class="info-item">
-                <div class="label">Video Bitrate</div>
-                <div class="value" id="info-video-bitrate">--</div>
-            </div>
-            <div class="info-item">
-                <div class="label">Audio Bitrate</div>
-                <div class="value" id="info-audio-bitrate">--</div>
-            </div>
-            <div class="info-item">
-                <div class="label">Dropped Frames</div>
-                <div class="value" id="info-dropped-frames">0</div>
-            </div>
-            <div class="info-item">
-                <div class="label">Current Time</div>
-                <div class="value" id="info-current-time">00:00</div>
-            </div>
-            <div class="info-item">
-                <div class="label">Duration</div>
-                <div class="value" id="info-duration">--</div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<script>
-    class PlayerController {
-        constructor() {
-            this.player = null;
-            this.video = null;
-            this.ui = null;
-            this.manifestUri = 'http://localhost:3001/master.m3u8'; // Change this to your HLS manifest path
-
-            this.init();
-        }
-
-        async init() {
-            try {
-                // Check if browser supports Shaka Player
-                if (!shaka.Player.isBrowserSupported()) {
-                    this.showError('Browser not supported!');
-                    return;
-                }
-
-                // Get video element
-                this.video = document.getElementById('video');
-                const container = document.getElementById('video-container');
-
-                // Create Shaka Player
-                this.player = new shaka.Player(this.video);
-
-                // Create UI
-                this.ui = new shaka.ui.Overlay(this.player, container, this.video);
-
-                // Configure UI
-                const config = {
-                    controlPanelElements: [
-                        'play_pause',
-                        'time_and_duration',
-                        'spacer',
-                        'mute',
-                        'volume',
-                        'fullscreen',
-                        'overflow_menu',
-                    ],
-                    overflowMenuButtons: [
-                        'captions',
-                        'quality',
-                        'language',
-                        'picture_in_picture',
-                        'playback_rate',
-                    ],
-                    seekBarColors: {
-                        base: 'rgba(255, 255, 255, 0.3)',
-                        buffered: 'rgba(255, 255, 255, 0.5)',
-                        played: 'rgb(102, 126, 234)',
-                    }
-                };
-                this.ui.configure(config);
-
-                // Configure player
-                this.player.configure({
-                    streaming: {
-                        bufferingGoal: 30,
-                        rebufferingGoal: 15,
-                        bufferBehind: 30,
-                    },
-                    abr: {
-                        enabled: true,
-                        defaultBandwidthEstimate: 5000000, // 5 Mbps default
-                    }
-                });
-
-                // Setup event listeners
-                this.setupEventListeners();
-
-                // Load manifest
-                await this.loadManifest(this.manifestUri);
-
-                this.updateStatus('playing', 'Ready to play');
-
-            } catch (error) {
-                this.showError(error.message);
-            }
-        }
-
-        setupEventListeners() {
-            // Player events
-            this.player.addEventListener('error', (event) => this.onError(event));
-            this.player.addEventListener('buffering', (event) => this.onBuffering(event));
-            this.player.addEventListener('adaptation', () => this.onAdaptation());
-            this.player.addEventListener('loaded', () => this.onLoaded());
-
-            // Video events
-            this.video.addEventListener('play', () => this.updateStatus('playing', 'Playing'));
-            this.video.addEventListener('pause', () => this.updateStatus('loading', 'Paused'));
-            this.video.addEventListener('timeupdate', () => this.updateInfo());
-            this.video.addEventListener('loadedmetadata', () => this.updateInfo());
-
-            // Custom controls
-            document.getElementById('quality-select').addEventListener('change', (e) => {
-                this.changeQuality(e.target.value);
-            });
-
-            document.getElementById('audio-select').addEventListener('change', (e) => {
-                this.changeAudioTrack(e.target.value);
-            });
-
-            document.getElementById('subtitle-select').addEventListener('change', (e) => {
-                this.changeSubtitle(e.target.value);
-            });
-
-            // Update stats periodically
-            setInterval(() => this.updateStats(), 1000);
-        }
-
-        async loadManifest(uri) {
-            try {
-                this.updateStatus('loading', 'Loading video...');
-                await this.player.load(uri);
-                this.populateTrackSelectors();
-                this.updateStatus('playing', 'Video loaded successfully');
-            } catch (error) {
-                this.showError('Failed to load video: ' + error.message);
-            }
-        }
-
-        populateTrackSelectors() {
-            // Populate quality selector
-            const qualitySelect = document.getElementById('quality-select');
-            qualitySelect.innerHTML = '<option value="auto">Auto (Adaptive)</option>';
-
-            const tracks = this.player.getVariantTracks();
-            const uniqueQualities = new Set();
-
-            tracks.forEach(track => {
-                const height = track.height;
-                const bandwidth = track.bandwidth;
-                const quality = `${height}p`;
-
-                if (!uniqueQualities.has(height)) {
-                    uniqueQualities.add(height);
-                    const option = document.createElement('option');
-                    option.value = track.id;
-                    option.textContent = `${quality} (${this.formatBitrate(bandwidth)})`;
-                    qualitySelect.appendChild(option);
-                }
-            });
-
-            // Populate audio selector
-            const audioSelect = document.getElementById('audio-select');
-            audioSelect.innerHTML = '';
-
-            const audioTracks = this.player.getVariantTracks().filter((track, index, self) =>
-                index === self.findIndex((t) => t.language === track.language && t.audioId === track.audioId)
-            );
-
-            if (audioTracks.length > 0) {
-                audioTracks.forEach((track, index) => {
-                    const option = document.createElement('option');
-                    option.value = track.language;
-                    const lang = track.language || 'Unknown';
-                    const label = track.label || `Track ${index + 1}`;
-                    option.textContent = `${label} (${lang})`;
-                    if (index === 0) option.selected = true;
-                    audioSelect.appendChild(option);
-                });
-            } else {
-                audioSelect.innerHTML = '<option value="">No audio tracks</option>';
-            }
-
-            // Populate subtitle selector
-            const subtitleSelect = document.getElementById('subtitle-select');
-            subtitleSelect.innerHTML = '<option value="off">Off</option>';
-
-            const textTracks = this.player.getTextTracks();
-
-            textTracks.forEach((track, index) => {
-                const option = document.createElement('option');
-                option.value = track.language;
-                const lang = track.language || 'Unknown';
-                const label = track.label || `Subtitle ${index + 1}`;
-                option.textContent = `${label} (${lang})`;
-                subtitleSelect.appendChild(option);
-            });
-        }
+    <div id="video-container">
+        <video id="video" controls crossOrigin="anonymous"></video>
         
-        // --- NEW FUNCTION TO LOAD SUBTITLE FROM URL ---
-        async loadExternalSubtitle() {
-            const urlInput = document.getElementById('subtitle-url-input');
-            const url = urlInput.value.trim();
+        <div class="custom-controls">
+            <div class="control-group">
+                <label for="quality-select">Quality:</label>
+                <select id="quality-select"></select>
+            </div>
+            <div class="control-group">
+                <label for="audio-select">Audio:</label>
+                <select id="audio-select"></select>
+            </div>
+            <div class="control-group">
+                <label for="subtitle-select">Subtitles:</label>
+                <select id="subtitle-select"></select>
+            </div>
+        </div>
+    </div>
 
-            if (!url) {
-                alert('Please enter a subtitle URL.');
-                return;
-            }
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const video = document.getElementById('video');
+            const streamUrl = 'http://localhost:3001/master.m3u8';
 
-            const lang = prompt('Enter the two-letter language code for this subtitle (e.g., en, es, fr):');
-            if (!lang || lang.trim().length !== 2) {
-                alert('Invalid language code. Please enter a two-letter code.');
-                return;
-            }
-            
-            const label = prompt('Enter an optional label for this subtitle track (e.g., "English Commentary"):', `Custom (${lang})`);
+            const qualitySelect = document.getElementById('quality-select');
+            const audioSelect = document.getElementById('audio-select');
+            const subtitleSelect = document.getElementById('subtitle-select');
 
-            try {
-                this.updateStatus('loading', `Loading subtitle: ${lang}...`);
-                // We assume VTT format here. For TTML, the MIME type would be 'application/ttml+xml'.
-                await this.player.addTextTrack(url, lang, 'subtitles', 'text/vtt', null, label);
-                
-                this.updateStatus('playing', 'Subtitle loaded successfully.');
-                console.log(`Subtitle track ${lang} added from ${url}`);
+            if (Hls.isSupported()) {
+                const hls = new Hls({
+                    // 3. --- DISABLE hls.js subtitle management ---
+                    // This is the key. We will handle it ourselves.
+                    subtitleDisplay: false
+                });
 
-                // Refresh the subtitle dropdown to show the new option
-                this.populateTrackSelectors();
+                hls.loadSource(streamUrl);
+                hls.attachMedia(video);
 
-                // Optional: automatically select the newly added subtitle
-                this.changeSubtitle(lang);
-                document.getElementById('subtitle-select').value = lang;
+                // --- Quality and Audio (Unchanged) ---
+                hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+                    qualitySelect.innerHTML = ''; 
+                    const autoOption = document.createElement('option');
+                    autoOption.value = -1;
+                    autoOption.innerText = 'Auto';
+                    qualitySelect.appendChild(autoOption);
+                    data.levels.forEach((level, index) => {
+                        const option = document.createElement('option');
+                        option.value = index;
+                        option.innerText = level.height ? `${level.height}p` : `~${Math.round(level.bitrate / 1000)}kbps`;
+                        qualitySelect.appendChild(option);
+                    });
+                });
 
-                // Clear the input field for the next URL
-                urlInput.value = '';
+                hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+                    audioSelect.innerHTML = ''; 
+                    data.audioTracks.forEach((track, index) => {
+                        const option = document.createElement('option');
+                        option.value = index;
+                        option.innerText = track.name || track.lang || `Track ${index}`;
+                        if (track.default) option.selected = true;
+                        audioSelect.appendChild(option);
+                    });
+                    hls.audioTrack = Number(audioSelect.value);
+                });
 
-            } catch (error) {
-                this.showError(`Failed to load subtitle: ${error.message}`);
-                console.error('Error loading external subtitle:', error);
-            }
-        }
-        // --- END NEW FUNCTION ---
 
-        changeQuality(trackId) {
-            if (trackId === 'auto') {
-                this.player.configure({ abr: { enabled: true } });
-                console.log('Switched to adaptive bitrate');
-            } else {
-                this.player.configure({ abr: { enabled: false } });
-                const tracks = this.player.getVariantTracks();
-                const selectedTrack = tracks.find(t => t.id == trackId);
-                if (selectedTrack) {
-                    this.player.selectVariantTrack(selectedTrack, true);
-                    console.log('Switched to quality:', selectedTrack.height + 'p');
+                // --- 4. MANUAL SUBTITLE HANDLING ---
+                hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (event, data) => {
+                    // Clear previous tracks and dropdown options
+                    subtitleSelect.innerHTML = '';
+                    
+                    // Remove any old <track> elements we may have added
+                    Array.from(video.querySelectorAll('track')).forEach(t => t.remove());
+
+                    const offOption = document.createElement('option');
+                    offOption.value = -1;
+                    offOption.innerText = 'Off';
+                    subtitleSelect.appendChild(offOption);
+
+                    data.subtitleTracks.forEach((track, index) => {
+                        // Create the <option> for our dropdown
+                        const option = document.createElement('option');
+                        option.value = index; // Use index as the value
+                        option.innerText = track.name || track.lang || `Subtitle ${index}`;
+                        if (track.default) option.selected = true;
+                        subtitleSelect.appendChild(option);
+
+                        // --- Create the manual <track> element ---
+                        const trackElement = document.createElement('track');
+                        trackElement.kind = 'subtitles';
+                        trackElement.label = track.name || `Subtitle ${index}`;
+                        trackElement.srclang = track.lang || '';
+                        trackElement.src = track.url; // The direct URL to the .vtt file
+                        
+                        // Set its mode to 'hidden' by default
+                        trackElement.mode = 'hidden';
+                        
+                        // Add it to the video element
+                        video.appendChild(trackElement);
+                    });
+                    
+                    // After adding all tracks, set the default one
+                    updateSubtitleDisplay();
+                });
+
+                function updateSubtitleDisplay() {
+                    const selectedIndex = Number(subtitleSelect.value);
+
+                    // Loop through the video's NATIVE textTracks list
+                    // This list is now populated by our manual <track> elements.
+                    for (let i = 0; i < video.textTracks.length; i++) {
+                        // hls.js tracks will be in here, but also our manual ones.
+                        // We check the label to be sure, or just the index.
+                        // The manual tracks we added should appear in the same order.
+                        if (i === selectedIndex) {
+                            video.textTracks[i].mode = 'showing';
+                        } else {
+                            video.textTracks[i].mode = 'hidden';
+                        }
+                    }
                 }
+
+                // --- 5. EVENT LISTENERS ---
+                // This now controls the native video.textTracks
+                subtitleSelect.addEventListener('change', updateSubtitleDisplay);
+                
+                // These control hls.js
+                qualitySelect.addEventListener('change', (event) => {
+                    hls.currentLevel = Number(event.target.value);
+                });
+
+                audioSelect.addEventListener('change', (event) => {
+                    hls.audioTrack = Number(event.target.value);
+                });
+
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = streamUrl;
+                console.log('Using native HLS support.');
             }
-        }
-
-        changeAudioTrack(language) {
-            if (!language) return;
-
-            this.player.selectAudioLanguage(language);
-            console.log('Switched audio to:', language);
-        }
-
-        changeSubtitle(language) {
-            if (language === 'off') {
-                this.player.setTextTrackVisibility(false);
-                console.log('Subtitles disabled');
-            } else {
-                this.player.selectTextLanguage(language);
-                this.player.setTextTrackVisibility(true);
-                console.log('Switched subtitle to:', language);
-            }
-        }
-
-        updateStatus(type, message) {
-            const indicator = document.getElementById('status-indicator');
-            const text = document.getElementById('status-text');
-
-            indicator.className = `status-indicator ${type}`;
-            text.textContent = message;
-        }
-
-        updateInfo() {
-            // Current time and duration
-            const currentTime = this.video.currentTime;
-            const duration = this.video.duration;
-
-            document.getElementById('info-current-time').textContent = this.formatTime(currentTime);
-            document.getElementById('info-duration').textContent = this.formatTime(duration);
-        }
-
-        updateStats() {
-            if (!this.player) return;
-
-            const stats = this.player.getStats();
-            const activeTrack = this.player.getVariantTracks().find(t => t.active);
-
-            if (activeTrack) {
-                const quality = `${activeTrack.height}p`;
-                const videoBitrate = this.formatBitrate(activeTrack.videoBandwidth);
-                const audioBitrate = this.formatBitrate(activeTrack.audioBandwidth);
-
-                document.getElementById('info-quality').textContent = quality;
-                document.getElementById('info-video-bitrate').textContent = videoBitrate;
-                document.getElementById('info-audio-bitrate').textContent = audioBitrate;
-
-                document.getElementById('current-quality').textContent = `Quality: ${quality}`;
-                document.getElementById('current-bitrate').textContent =
-                    `Bitrate: ${videoBitrate} (video) + ${audioBitrate} (audio)`;
-            }
-
-            // Buffer info
-            const bufferedEnd = this.video.buffered.length > 0 ?
-                this.video.buffered.end(this.video.buffered.length - 1) : 0;
-            const bufferAmount = bufferedEnd - this.video.currentTime;
-            document.getElementById('buffer-info').textContent =
-                `Buffer: ${bufferAmount.toFixed(1)}s`;
-
-            // Dropped frames
-            if (this.video.getVideoPlaybackQuality) {
-                const quality = this.video.getVideoPlaybackQuality();
-                document.getElementById('info-dropped-frames').textContent =
-                    quality.droppedVideoFrames;
-            }
-        }
-
-        formatTime(seconds) {
-            if (!isFinite(seconds)) return '--:--';
-
-            const hours = Math.floor(seconds / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            const secs = Math.floor(seconds % 60);
-
-            if (hours > 0) {
-                return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-            }
-            return `${minutes}:${String(secs).padStart(2, '0')}`;
-        }
-
-        formatBitrate(bps) {
-            if (!bps) return 'N/A';
-
-            const kbps = bps / 1000;
-            if (kbps >= 1000) {
-                return (kbps / 1000).toFixed(2) + ' Mbps';
-            }
-            return kbps.toFixed(0) + ' kbps';
-        }
-
-        togglePlayPause() {
-            if (this.video.paused) {
-                this.video.play();
-            } else {
-                this.video.pause();
-            }
-        }
-
-        toggleFullscreen() {
-            const container = document.getElementById('video-container');
-            if (!document.fullscreenElement) {
-                container.requestFullscreen();
-            } else {
-                document.exitFullscreen();
-            }
-        }
-
-        reload() {
-            this.video.load();
-            this.loadManifest(this.manifestUri);
-        }
-
-        showStats() {
-            const stats = this.player.getStats();
-            const statsText = JSON.stringify(stats, null, 2);
-            alert('Player Statistics:\n\n' + statsText);
-        }
-
-        onError(event) {
-            this.showError('Playback error: ' + event.detail.message);
-        }
-
-        onBuffering(event) {
-            if (event.buffering) {
-                this.updateStatus('loading', 'Buffering...');
-            } else {
-                this.updateStatus('playing', 'Playing');
-            }
-        }
-
-        onAdaptation() {
-            console.log('Quality adapted');
-            this.updateStats();
-        }
-
-        onLoaded() {
-            console.log('Manifest loaded');
-        }
-
-        showError(message) {
-            console.error(message);
-            this.updateStatus('error', message);
-            alert('Error: ' + message);
-        }
-    }
-
-    // Initialize player when page loads
-    let playerController;
-    document.addEventListener('DOMContentLoaded', () => {
-        playerController = new PlayerController();
-    });
-</script>
+        });
+    </script>
 </body>
 </html>
