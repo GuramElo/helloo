@@ -4,7 +4,7 @@ HLS Video Converter with Stable Subtitle Support
 Converts MKV/MP4 files to HLS format with multiple quality variants,
 separate audio tracks, and native browser-compatible subtitles.
 
-VERSION 5.1: Hardware acceleration + parallel processing + smart efficiency warnings
+VERSION 6.0: Stream copy for H.264 sources + codec compatibility detection
 """
 
 import os
@@ -21,13 +21,14 @@ from functools import partial
 class HLSConverter:
     def __init__(self, input_file: str, output_dir: str, best_quality: bool = False,
                  explicit_qualities: List[str] = None, hw_accel: Optional[str] = None,
-                 parallel: bool = False):
+                 parallel: bool = False, force_reencode: bool = False):
         self.input_file = input_file
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.best_quality = best_quality
         self.hw_accel = hw_accel
         self.parallel = parallel
+        self.force_reencode = force_reencode
 
         # Determine which qualities to generate
         if explicit_qualities:
@@ -56,6 +57,8 @@ class HLSConverter:
         self.audio_streams = []
         self.subtitle_streams = []
         self.converted_subtitles = []
+        self.source_is_h264 = False
+        self.can_copy_video = False
 
     def check_ffmpeg(self) -> bool:
         """Check if ffmpeg and ffprobe are available"""
@@ -177,6 +180,43 @@ class HLSConverter:
 
         elif self.hw_accel in ['qsv', 'amf']:
             print(f"\n✅ {self.hw_accel.upper()} typically supports {len(self.enabled_qualities)} concurrent sessions well\n")
+
+    def _is_h264_compatible(self) -> bool:
+        """
+        Check if source video is H.264/AVC and suitable for stream copy.
+        Returns True if we can safely use -c:v copy for the high quality variant.
+        """
+        if not self.video_info:
+            return False
+
+        codec = self.video_info.get('codec', '').lower()
+        profile = self.video_info.get('profile', '').lower()
+        level = self.video_info.get('level', 0)
+
+        # Check if it's H.264
+        h264_codecs = ['h264', 'avc', 'avc1']
+        is_h264 = any(codec.startswith(c) for c in h264_codecs)
+
+        if not is_h264:
+            return False
+
+        # Check profile compatibility (High profile or below is good)
+        # High 10, High 4:2:2, High 4:4:4 might have limited browser support
+        incompatible_profiles = ['high 10', 'high 4:2:2', 'high 4:4:4', 'high 10 intra']
+        if any(prof in profile for prof in incompatible_profiles):
+            return False
+
+        # Check level (4.1 and below is universally supported)
+        # Level above 5.1 might have issues on some devices
+        if level > 51:  # 5.1
+            return False
+
+        # Check pixel format
+        pix_fmt = self.video_info.get('pix_fmt', '')
+        if pix_fmt not in ['yuv420p', 'yuvj420p']:
+            return False
+
+        return True
 
     def get_encoder_settings(self, profile: Dict) -> Tuple[str, List[str]]:
         """Get encoder and its settings based on hardware acceleration"""
@@ -530,7 +570,9 @@ class HLSConverter:
                         'height': stream.get('height'),
                         'fps': self._parse_fps(stream.get('r_frame_rate', '25/1')),
                         'bitrate': stream.get('bit_rate', 'N/A'),
-                        'pix_fmt': stream.get('pix_fmt', 'yuv420p')
+                        'pix_fmt': stream.get('pix_fmt', 'yuv420p'),
+                        'profile': stream.get('profile', ''),
+                        'level': stream.get('level', 0),
                     }
                     print(f"   ✓ Video stream detected")
 
@@ -577,27 +619,103 @@ class HLSConverter:
                 print("\n❌ ERROR: No video stream found in input file")
                 return False
 
+            # Check if source is H.264 and compatible for stream copy
+            self.source_is_h264 = self._is_h264_compatible()
+
+            # Determine if we can use stream copy for "high" quality
+            if 'high' in self.enabled_qualities and self.source_is_h264 and not self.force_reencode:
+                self.can_copy_video = True
+            else:
+                self.can_copy_video = False
+
             # Determine quality ladder based on source resolution
             self._determine_quality_ladder()
 
             print(f"\n{'='*70}")
-            print(f"📹 Video: {self.video_info['codec']} "
+            print(f"📹 Video: {self.video_info['codec'].upper()} "
                   f"{self.video_info['width']}x{self.video_info['height']} "
                   f"@ {self.video_info['fps']} fps")
+            print(f"   Profile: {self.video_info['profile']}, Level: {self.video_info['level']/10:.1f}")
+            print(f"   Pixel Format: {self.video_info['pix_fmt']}")
+
+            # Show codec compatibility status
+            print(f"\n{'='*70}")
+            print(f"🌐 BROWSER COMPATIBILITY CHECK")
+            print(f"{'='*70}")
+
+            codec_name = self.video_info['codec'].lower()
+
+            if 'h264' in codec_name or 'avc' in codec_name:
+                if self.source_is_h264:
+                    print(f"✅ Codec: H.264/AVC - PERFECT for web streaming")
+                    print(f"   • Browser Support: ~99% (universal)")
+                    print(f"   • HLS Native Support: Excellent")
+                    if self.can_copy_video:
+                        print(f"   • Video Quality: 🎯 'high' quality will use STREAM COPY")
+                        print(f"                    ⭐ ZERO quality loss - original preserved!")
+                    else:
+                        if self.force_reencode:
+                            print(f"   • Video Quality: Re-encoding forced by --force-reencode flag")
+                        else:
+                            print(f"   • Video Quality: Profile/level requires re-encoding")
+                else:
+                    print(f"⚠️  Codec: H.264/AVC - Compatible but needs re-encoding")
+                    profile = self.video_info['profile'].lower()
+                    if 'high 10' in profile or 'high 4:2:2' in profile or 'high 4:4:4' in profile:
+                        print(f"   • Reason: Profile '{self.video_info['profile']}' has limited browser support")
+                        print(f"   • Solution: Will re-encode to High Profile (universally supported)")
+                    elif self.video_info['level'] > 51:
+                        print(f"   • Reason: Level {self.video_info['level']/10:.1f} may have device compatibility issues")
+                        print(f"   • Solution: Will re-encode to Level 4.1 (universally supported)")
+                    elif self.video_info['pix_fmt'] not in ['yuv420p', 'yuvj420p']:
+                        print(f"   • Reason: Pixel format '{self.video_info['pix_fmt']}' not universally supported")
+                        print(f"   • Solution: Will re-encode to yuv420p")
+
+            elif 'hevc' in codec_name or 'h265' in codec_name:
+                print(f"❌ Codec: HEVC/H.265 - NOT SUITABLE for web streaming")
+                print(f"   • Chrome/Firefox/Edge: ❌ No support")
+                print(f"   • Safari (Apple devices): ⚠️  Limited support")
+                print(f"   • Solution: ⚙️  MUST TRANSCODE to H.264")
+                print(f"   • Impact: Quality loss inevitable (will use highest quality settings)")
+
+            elif 'vp9' in codec_name:
+                print(f"⚠️  Codec: VP9 - Wrong container for HLS")
+                print(f"   • Browser Support: Good (90%+ for VP9 itself)")
+                print(f"   • HLS Support: ❌ VP9 designed for DASH/WebM, not HLS")
+                print(f"   • Solution: ⚙️  Will transcode to H.264")
+
+            elif 'vp8' in codec_name:
+                print(f"❌ Codec: VP8 - Not suitable for HLS")
+                print(f"   • Solution: ⚙️  Will transcode to H.264")
+
+            elif 'av1' in codec_name:
+                print(f"⚠️  Codec: AV1 - Too early for production web")
+                print(f"   • Browser Support: ~70% (Chrome/Firefox modern versions)")
+                print(f"   • HLS Support: Experimental")
+                print(f"   • Decoding: CPU-intensive without hardware support")
+                print(f"   • Solution: ⚙️  Will transcode to H.264 for universal compatibility")
+
+            elif 'mpeg2' in codec_name or codec_name == 'mpeg2video':
+                print(f"❌ Codec: MPEG-2 - Legacy codec, no browser support")
+                print(f"   • Solution: ⚙️  Will transcode to H.264")
+
+            else:
+                print(f"❌ Codec: {codec_name.upper()} - Unknown/unsupported for web")
+                print(f"   • Solution: ⚙️  Will transcode to H.264")
+
+            print(f"{'='*70}")
 
             # Show resolution category
             if self.video_info['height'] >= 2160:
-                print(f"   🎬 Resolution Category: 4K/UHD")
+                print(f"\n🎬 Resolution Category: 4K/UHD")
             elif self.video_info['height'] >= 1440:
-                print(f"   🎬 Resolution Category: 2K/QHD")
+                print(f"\n🎬 Resolution Category: 2K/QHD")
             elif self.video_info['height'] >= 1080:
-                print(f"   🎬 Resolution Category: Full HD")
+                print(f"\n🎬 Resolution Category: Full HD")
             elif self.video_info['height'] >= 720:
-                print(f"   🎬 Resolution Category: HD")
+                print(f"\n🎬 Resolution Category: HD")
             else:
-                print(f"   🎬 Resolution Category: SD")
-
-            print(f"{'='*70}")
+                print(f"\n🎬 Resolution Category: SD")
 
             if self.audio_streams:
                 print(f"\n🔊 Found {len(self.audio_streams)} audio stream(s):")
@@ -785,49 +903,77 @@ class HLSConverter:
         scale, width, height = self._calculate_scale(profile['height'])
         output_name = f"video_{profile_name}"
 
-        encoder_name, encoder_settings = self.get_encoder_settings(profile)
+        # Check if we should use stream copy for "high" quality
+        use_copy = (profile_name == 'high' and self.can_copy_video)
 
-        # Build encoding command
-        cmd = [
-            'ffmpeg',
-            '-i', self.input_file,
-            '-map', f"0:{self.video_info['index']}",
-        ]
+        if use_copy:
+            print(f"   🎯 Using STREAM COPY - preserving original video (zero quality loss)")
+            cmd = [
+                'ffmpeg',
+                '-i', self.input_file,
+                '-map', f"0:{self.video_info['index']}",
+                '-c:v', 'copy',  # Stream copy!
+                '-an',  # No audio
+                '-f', 'hls',
+                '-hls_time', '6',
+                '-hls_playlist_type', 'vod',
+                '-hls_segment_type', 'mpegts',
+                '-hls_segment_filename', str(self.output_dir / f"{output_name}_%03d.ts"),
+                '-v', 'warning',
+                '-stats',
+                '-y',
+                str(self.output_dir / f"{output_name}.m3u8")
+            ]
 
-        # Add hardware acceleration input if using VAAPI
-        if self.hw_accel == 'vaapi':
-            cmd.extend(['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'])
+            # Add forced keyframes for proper HLS segmentation
+            # This is needed because source might not have keyframes at ideal intervals
+            cmd.insert(-4, '-force_key_frames')
+            cmd.insert(-4, 'expr:gte(t,n_forced*6)')  # Force keyframe every 6 seconds (HLS segment time)
 
-        # Add encoder settings
-        cmd.extend(encoder_settings)
-
-        # Scaling - use hardware scaling for VAAPI
-        if self.hw_accel == 'vaapi':
-            cmd.extend(['-vf', f"scale_vaapi=w={width}:h={height}"])
         else:
-            cmd.extend(['-vf', f"scale={scale}:flags=lanczos"])
+            # Normal encoding path
+            encoder_name, encoder_settings = self.get_encoder_settings(profile)
 
-        # Add common settings
-        cmd.extend([
-            '-maxrate', profile['maxrate'],
-            '-bufsize', profile['bufsize'],
-            '-g', str(int(self.video_info['fps'] * 2)),
-            '-keyint_min', str(int(self.video_info['fps'])),
-            '-sc_threshold', '0',
-            '-pix_fmt', 'yuv420p',
-            '-an',
-            '-f', 'hls',
-            '-hls_time', '6',
-            '-hls_playlist_type', 'vod',
-            '-hls_segment_type', 'mpegts',
-            '-hls_segment_filename', str(self.output_dir / f"{output_name}_%03d.ts"),
-            '-v', 'warning',
-            '-stats',
-            '-y',
-            str(self.output_dir / f"{output_name}.m3u8")
-        ])
+            # Build encoding command
+            cmd = [
+                'ffmpeg',
+                '-i', self.input_file,
+                '-map', f"0:{self.video_info['index']}",
+            ]
 
-        try:
+            # Add hardware acceleration input if using VAAPI
+            if self.hw_accel == 'vaapi':
+                cmd.extend(['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'])
+
+            # Add encoder settings
+            cmd.extend(encoder_settings)
+
+            # Scaling - use hardware scaling for VAAPI
+            if self.hw_accel == 'vaapi':
+                cmd.extend(['-vf', f"scale_vaapi=w={width}:h={height}"])
+            else:
+                cmd.extend(['-vf', f"scale={scale}:flags=lanczos"])
+
+            # Add common settings
+            cmd.extend([
+                '-maxrate', profile['maxrate'],
+                '-bufsize', profile['bufsize'],
+                '-g', str(int(self.video_info['fps'] * 2)),
+                '-keyint_min', str(int(self.video_info['fps'])),
+                '-sc_threshold', '0',
+                '-pix_fmt', 'yuv420p',
+                '-an',
+                '-f', 'hls',
+                '-hls_time', '6',
+                '-hls_playlist_type', 'vod',
+                '-hls_segment_type', 'mpegts',
+                '-hls_segment_filename', str(self.output_dir / f"{output_name}_%03d.ts"),
+                '-v', 'warning',
+                '-stats',
+                '-y',
+                str(self.output_dir / f"{output_name}.m3u8")
+            ])
+
             print(f"   Settings:")
             print(f"      Encoder: {encoder_name}")
             print(f"      Resolution: {width}x{height}")
@@ -837,6 +983,8 @@ class HLSConverter:
                 print(f"      Preset: {profile['preset']}")
                 if profile.get('use_advanced', False):
                     print(f"      Advanced x264: enabled")
+
+        try:
             print(f"   Encoding...")
 
             process = subprocess.Popen(
@@ -853,7 +1001,10 @@ class HLSConverter:
             process.wait()
 
             if process.returncode == 0:
-                print(f"\n   ✅ {profile_name} video completed successfully")
+                if use_copy:
+                    print(f"\n   ✅ {profile_name} video completed (stream copy - original quality preserved)")
+                else:
+                    print(f"\n   ✅ {profile_name} video completed successfully")
                 return True
             else:
                 print(f"\n   ❌ {profile_name} video failed")
@@ -871,6 +1022,7 @@ class HLSConverter:
 
         print(f"\n{'='*70}")
         print(f"🔊 Converting {len(self.audio_streams)} audio track(s) x {len(self.enabled_qualities)} qualities")
+        print(f"   Note: Audio is always re-encoded to AAC (required for universal HLS compatibility)")
         print(f"{'='*70}")
 
         success = True
@@ -926,7 +1078,20 @@ class HLSConverter:
                 video_playlist = f"video_{profile_name}.m3u8"
 
                 if (self.output_dir / video_playlist).exists():
-                    video_bw = int(profile['video_bitrate'].replace('k', '000'))
+                    # For "high" quality with stream copy, estimate bandwidth from source
+                    if profile_name == 'high' and self.can_copy_video:
+                        # Try to get actual bitrate from source
+                        if self.video_info['bitrate'] != 'N/A':
+                            try:
+                                video_bw = int(self.video_info['bitrate'])
+                            except:
+                                video_bw = int(profile['video_bitrate'].replace('k', '000'))
+                        else:
+                            # Fallback to profile bitrate
+                            video_bw = int(profile['video_bitrate'].replace('k', '000'))
+                    else:
+                        video_bw = int(profile['video_bitrate'].replace('k', '000'))
+
                     audio_bw = int(audio_profile['bitrate'].replace('k', '000'))
                     total_bandwidth = video_bw + audio_bw
 
@@ -949,7 +1114,7 @@ class HLSConverter:
         """Main conversion process"""
         mode_label = "Maximum Quality Mode" if self.best_quality else "Balanced Mode"
         print("\n" + "="*70)
-        print(f" "*10 + f"🎥 HLS VIDEO CONVERTER ({mode_label})")
+        print(f" "*10 + f"🎥 HLS VIDEO CONVERTER v6.0 ({mode_label})")
         print("="*70)
         print(f"📁 Input:  {self.input_file}")
         print(f"📁 Output: {self.output_dir}")
@@ -958,6 +1123,8 @@ class HLSConverter:
         else:
             print(f"⚡ Quality: BALANCED (medium/fast presets)")
         print(f"🎯 Qualities: {', '.join(self.enabled_qualities)}")
+        if self.force_reencode:
+            print(f"⚙️  Force Re-encode: YES (even for H.264 sources)")
 
         # Hardware acceleration detection
         if self.hw_accel == 'auto':
@@ -999,6 +1166,8 @@ class HLSConverter:
         # Convert video
         print(f"\n{'='*70}")
         print(f"PHASE 1: Converting Video Streams ({len(self.enabled_qualities)} qualities)")
+        if self.can_copy_video and 'high' in self.enabled_qualities:
+            print(f"         🎯 'high' quality: STREAM COPY (zero quality loss)")
         if self.parallel:
             print(f"         Running in PARALLEL mode with {min(len(self.enabled_qualities), cpu_count())} workers")
         print(f"{'='*70}")
@@ -1014,7 +1183,8 @@ class HLSConverter:
                                       video_info=self.video_info,
                                       hw_accel=self.hw_accel,
                                       best_quality=self.best_quality,
-                                      enabled_qualities=self.enabled_qualities)
+                                      enabled_qualities=self.enabled_qualities,
+                                      can_copy_video=self.can_copy_video)
 
                 results = pool.map(convert_func,
                                   [(name, self.quality_profiles[name]) for name in self.enabled_qualities])
@@ -1040,14 +1210,25 @@ class HLSConverter:
         quality_summary = []
         for profile_name in self.enabled_qualities:
             _, w, h = self._calculate_scale(self.quality_profiles[profile_name]['height'])
-            quality_summary.append({
-                'name': profile_name,
-                'width': w,
-                'height': h,
-                'bitrate': self.quality_profiles[profile_name]['video_bitrate'],
-                'crf': self.quality_profiles[profile_name]['crf'],
-                'preset': self.quality_profiles[profile_name]['preset']
-            })
+
+            if profile_name == 'high' and self.can_copy_video:
+                quality_summary.append({
+                    'name': profile_name,
+                    'width': w,
+                    'height': h,
+                    'mode': 'COPY',
+                    'note': 'Original quality preserved'
+                })
+            else:
+                quality_summary.append({
+                    'name': profile_name,
+                    'width': w,
+                    'height': h,
+                    'bitrate': self.quality_profiles[profile_name]['video_bitrate'],
+                    'crf': self.quality_profiles[profile_name]['crf'],
+                    'preset': self.quality_profiles[profile_name]['preset'],
+                    'mode': 'ENCODE'
+                })
 
         audio_bitrates = '/'.join([self.audio_profiles[q]['bitrate'] for q in self.enabled_qualities])
 
@@ -1057,6 +1238,7 @@ class HLSConverter:
         print(f"📁 Output directory:    {self.output_dir}")
         print(f"🎬 Master playlist:     {master_playlist}")
         print(f"📺 Source resolution:   {self.video_info['width']}x{self.video_info['height']}")
+        print(f"🎞️  Source codec:        {self.video_info['codec'].upper()}")
 
         if self.hw_accel:
             print(f"🚀 Hardware acceleration: {self.hw_accel.upper()}")
@@ -1067,11 +1249,15 @@ class HLSConverter:
 
         for q in quality_summary:
             label = q['name'].capitalize()
-            print(f"   • {label:6} {q['width']}x{q['height']} @ {q['bitrate']}, "
-                  f"CRF {q['crf']}, preset={q['preset']}")
+            if q['mode'] == 'COPY':
+                print(f"   • {label:6} {q['width']}x{q['height']} - ⭐ STREAM COPY ({q['note']})")
+            else:
+                print(f"   • {label:6} {q['width']}x{q['height']} @ {q['bitrate']}, "
+                      f"CRF {q['crf']}, preset={q['preset']}")
 
         print(f"\n🔊 Audio tracks:        {len(self.audio_streams)} x {len(self.enabled_qualities)} qualities ({audio_bitrates})")
-        print(f"💬 Subtitle tracks:     {len(self.converted_subtitles)} converted")
+        print(f"                        Always re-encoded to AAC (HLS requirement)")
+        print(f"💬 Subtitle tracks:     {len(self.converted_subtitles)} converted to WebVTT")
         if self.converted_subtitles:
             print(f"📄 Subtitle manifest:   subtitles.json")
         print("="*70)
@@ -1085,6 +1271,12 @@ class HLSConverter:
 
         print(f"\n💡 Available Qualities: {available}")
         print(f"   Generated: {generated}")
+
+        if self.can_copy_video and 'high' in self.enabled_qualities:
+            print(f"\n   ⭐ QUALITY PRESERVATION:")
+            print(f"      • 'high' quality: ZERO quality loss (stream copy)")
+            print(f"      • Source codec: {self.video_info['codec'].upper()} (perfect for web)")
+            print(f"      • Other qualities: Re-encoded with {mode_label.lower()}")
 
         if self.best_quality:
             print("\n   ⭐ Maximum Quality Optimizations:")
@@ -1110,7 +1302,7 @@ class HLSConverter:
         return video_success and audio_success
 
     @staticmethod
-    def _convert_video_wrapper(args, input_file, output_dir, video_info, hw_accel, best_quality, enabled_qualities):
+    def _convert_video_wrapper(args, input_file, output_dir, video_info, hw_accel, best_quality, enabled_qualities, can_copy_video):
         """Wrapper for parallel video conversion"""
         profile_name, profile = args
 
@@ -1123,6 +1315,7 @@ class HLSConverter:
             explicit_qualities=enabled_qualities
         )
         temp_converter.video_info = video_info
+        temp_converter.can_copy_video = can_copy_video
         temp_converter._determine_quality_ladder()
 
         return temp_converter.convert_video_quality_variant(profile_name, profile)
@@ -1134,35 +1327,41 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Balanced mode with all 3 qualities (default)
+  # Balanced mode - if source is H.264, 'high' uses stream copy (zero quality loss)
   %(prog)s input.mkv output_dir/
 
   # With hardware acceleration (auto-detect) - RECOMMENDED
   %(prog)s input.mkv output_dir/ --hw-accel=auto
 
-  # With NVIDIA hardware acceleration
-  %(prog)s input.mkv output_dir/ --hw-accel=nvenc
-
-  # CPU parallel processing (best for software encoding)
-  %(prog)s input.mkv output_dir/ --parallel
+  # Force re-encode even if source is H.264 (if you want consistent quality)
+  %(prog)s input.mkv output_dir/ --force-reencode
 
   # Maximum quality with hardware acceleration
   %(prog)s input.mkv output_dir/ --best-quality --hw-accel=auto
 
-  # Hardware + parallel (auto-detects efficiency)
-  %(prog)s input.mkv output_dir/ --hw-accel=auto --parallel
+  # Only generate 'high' quality with stream copy (fastest, perfect quality)
+  %(prog)s input.mkv output_dir/ --explicit-qualities=high
 
-  # Generate only high quality with NVIDIA GPU
-  %(prog)s input.mkv output_dir/ --explicit-qualities=high --hw-accel=nvenc
+  # HEVC/H.265 source (will be transcoded to H.264)
+  %(prog)s hevc_input.mkv output_dir/ --best-quality --hw-accel=auto
 
-  # Two qualities with parallel (optimal for GeForce GPUs)
-  %(prog)s input.mkv output_dir/ --explicit-qualities=high,medium --hw-accel=nvenc --parallel
+Browser Codec Compatibility:
+  ✅ H.264/AVC:     Universal (~99% browsers) - RECOMMENDED
+                   • If source is H.264: 'high' quality uses stream copy (zero loss)
+                   • If not: transcodes to H.264 with best quality settings
+
+  ❌ HEVC/H.265:    Limited (Safari only, not Chrome/Firefox/Edge)
+                   • Must transcode to H.264 - quality loss inevitable
+                   • Use --best-quality to minimize loss
+
+  ⚠️  VP9/AV1:      Wrong container (designed for DASH, not HLS)
+                   • Must transcode to H.264
+
+  ❌ Other codecs:  No browser support - must transcode
 
 Hardware Acceleration:
   auto:          Auto-detect best available (RECOMMENDED)
   nvenc:         NVIDIA GPU (h264_nvenc) - 5-10x faster
-                 GeForce: 2-3 concurrent sessions
-                 Quadro/Tesla: Unlimited sessions
   qsv:           Intel Quick Sync (h264_qsv) - 3-5x faster
   videotoolbox:  Apple VideoToolbox (macOS) - 3-5x faster
   amf:           AMD GPU (h264_amf) - 5-8x faster
@@ -1172,20 +1371,21 @@ Quality Modes:
   Balanced (default):  Medium/fast presets, CRF 20-26
   Best Quality (-b):   Slow presets, CRF 18-23, advanced x264
 
+Stream Copy Behavior:
+  • Source is H.264 compatible → 'high' quality uses stream copy (ZERO quality loss)
+  • Source is other codec → transcodes all qualities to H.264
+  • Use --force-reencode to always re-encode (even H.264)
+
 Parallel Processing:
   --parallel:    Encode multiple qualities simultaneously
                  • Best for: CPU encoding (no HW accel)
                  • Good for: Workstation GPUs, Intel QSV, AMD AMF
                  • Limited: Consumer NVIDIA (GeForce), VideoToolbox
 
-                 Script will automatically warn if parallel won't help!
-
 Performance Tips:
-  • Fastest single file:    --hw-accel=auto --explicit-qualities=high
-  • Best CPU utilization:   --parallel (no hw-accel)
-  • GeForce optimal:        --hw-accel=nvenc --explicit-qualities=high,medium --parallel
-  • Workstation GPU:        --hw-accel=nvenc --parallel (all qualities)
-  • Maximum quality:        --best-quality --hw-accel=auto
+  • Fastest with perfect quality:  --explicit-qualities=high (H.264 source)
+  • HEVC/H.265 source:              --best-quality --hw-accel=auto
+  • Maximum web compatibility:      Always use H.264 output (automatic)
         """
     )
 
@@ -1200,6 +1400,8 @@ Performance Tips:
                         help='Hardware acceleration method (auto-detect or specify)')
     parser.add_argument('--parallel', '-p', action='store_true',
                         help='Encode multiple qualities in parallel (auto-checks efficiency)')
+    parser.add_argument('--force-reencode', '-f', action='store_true',
+                        help='Force re-encoding even for H.264 sources (disable stream copy)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -1241,7 +1443,8 @@ Performance Tips:
                             best_quality=args.best_quality,
                             explicit_qualities=explicit_qualities,
                             hw_accel=args.hw_accel,
-                            parallel=args.parallel)
+                            parallel=args.parallel,
+                            force_reencode=args.force_reencode)
 
     try:
         if converter.convert():
