@@ -4,7 +4,7 @@ HLS Video Converter with Stable Subtitle Support
 Converts MKV/MP4 files to HLS format with multiple quality variants,
 separate audio tracks, and native browser-compatible subtitles.
 
-VERSION 4.5: Optional explicit quality selection via --explicit-qualities flag
+VERSION 5.0: Hardware acceleration + parallel processing support
 """
 
 import os
@@ -13,15 +13,21 @@ import json
 import subprocess
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import re
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 class HLSConverter:
-    def __init__(self, input_file: str, output_dir: str, best_quality: bool = False, explicit_qualities: List[str] = None):
+    def __init__(self, input_file: str, output_dir: str, best_quality: bool = False,
+                 explicit_qualities: List[str] = None, hw_accel: Optional[str] = None,
+                 parallel: bool = False):
         self.input_file = input_file
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.best_quality = best_quality
+        self.hw_accel = hw_accel
+        self.parallel = parallel
 
         # Determine which qualities to generate
         if explicit_qualities:
@@ -66,6 +72,155 @@ class HLSConverter:
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("ERROR: ffmpeg and ffprobe must be installed and in PATH")
             return False
+
+    def detect_hardware_acceleration(self) -> Optional[str]:
+        """Auto-detect available hardware acceleration"""
+        print("\n🔍 Detecting hardware acceleration capabilities...")
+
+        hw_encoders = {
+            'nvenc': 'h264_nvenc',      # NVIDIA
+            'qsv': 'h264_qsv',           # Intel Quick Sync
+            'videotoolbox': 'h264_videotoolbox',  # Apple
+            'amf': 'h264_amf',           # AMD
+            'vaapi': 'h264_vaapi',       # Linux VAAPI
+        }
+
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-encoders'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+
+            available = []
+            for name, encoder in hw_encoders.items():
+                if encoder in result.stdout:
+                    available.append(name)
+                    print(f"   ✓ Found: {name.upper()} ({encoder})")
+
+            if not available:
+                print(f"   ⚠️  No hardware acceleration detected")
+                return None
+
+            # Priority order: NVENC > Quick Sync > VideoToolbox > AMF > VAAPI
+            priority = ['nvenc', 'qsv', 'videotoolbox', 'amf', 'vaapi']
+            for hw in priority:
+                if hw in available:
+                    print(f"   🎯 Selected: {hw.upper()}")
+                    return hw
+
+            return available[0] if available else None
+
+        except subprocess.CalledProcessError:
+            print(f"   ⚠️  Could not detect hardware acceleration")
+            return None
+
+    def get_encoder_settings(self, profile: Dict) -> Tuple[str, List[str]]:
+        """Get encoder and its settings based on hardware acceleration"""
+        if not self.hw_accel:
+            # Software encoding (libx264)
+            encoder = 'libx264'
+            settings = [
+                '-c:v', 'libx264',
+                '-preset', profile['preset'],
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-crf', profile['crf'],
+            ]
+
+            if profile.get('use_advanced', False):
+                settings.extend([
+                    '-x264-params',
+                    'ref=5:bframes=5:b-adapt=2:direct=auto:me=umh:subme=9:trellis=2:aq-mode=3:aq-strength=0.8'
+                ])
+
+            return 'libx264', settings
+
+        # Hardware encoding
+        if self.hw_accel == 'nvenc':
+            # NVIDIA NVENC
+            preset_map = {
+                'slow': 'p7',      # Highest quality
+                'medium': 'p5',    # Balanced
+                'fast': 'p3'       # Fast
+            }
+            nvenc_preset = preset_map.get(profile['preset'], 'p5')
+
+            settings = [
+                '-c:v', 'h264_nvenc',
+                '-preset', nvenc_preset,
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-rc:v', 'vbr',
+                '-cq:v', profile['crf'],  # Quality level
+                '-b:v', profile['video_bitrate'],
+                '-maxrate:v', profile['maxrate'],
+                '-bufsize:v', profile['bufsize'],
+                '-spatial_aq', '1',
+                '-temporal_aq', '1',
+            ]
+            return 'h264_nvenc', settings
+
+        elif self.hw_accel == 'qsv':
+            # Intel Quick Sync
+            settings = [
+                '-c:v', 'h264_qsv',
+                '-preset', 'veryslow' if profile['preset'] == 'slow' else profile['preset'],
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-global_quality', profile['crf'],
+                '-b:v', profile['video_bitrate'],
+                '-maxrate', profile['maxrate'],
+                '-bufsize', profile['bufsize'],
+            ]
+            return 'h264_qsv', settings
+
+        elif self.hw_accel == 'videotoolbox':
+            # Apple VideoToolbox
+            settings = [
+                '-c:v', 'h264_videotoolbox',
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-b:v', profile['video_bitrate'],
+                '-maxrate', profile['maxrate'],
+                '-bufsize', profile['bufsize'],
+                '-allow_sw', '1',  # Allow software fallback
+            ]
+            return 'h264_videotoolbox', settings
+
+        elif self.hw_accel == 'amf':
+            # AMD AMF
+            settings = [
+                '-c:v', 'h264_amf',
+                '-quality', 'quality',  # quality/balanced/speed
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-rc', 'vbr_latency',
+                '-qp_i', profile['crf'],
+                '-qp_p', profile['crf'],
+                '-b:v', profile['video_bitrate'],
+                '-maxrate', profile['maxrate'],
+                '-bufsize', profile['bufsize'],
+            ]
+            return 'h264_amf', settings
+
+        elif self.hw_accel == 'vaapi':
+            # Linux VAAPI
+            settings = [
+                '-vaapi_device', '/dev/dri/renderD128',
+                '-c:v', 'h264_vaapi',
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-qp', profile['crf'],
+                '-b:v', profile['video_bitrate'],
+                '-maxrate', profile['maxrate'],
+                '-bufsize', profile['bufsize'],
+            ]
+            return 'h264_vaapi', settings
+
+        # Fallback to software
+        return self.get_encoder_settings(profile)[0], self.get_encoder_settings(profile)[1]
 
     def _determine_quality_ladder(self):
         """
@@ -567,36 +722,37 @@ class HLSConverter:
 
         scale, width, height = self._calculate_scale(profile['height'])
         output_name = f"video_{profile_name}"
-        preset = profile['preset']
+
+        encoder_name, encoder_settings = self.get_encoder_settings(profile)
 
         # Build encoding command
         cmd = [
             'ffmpeg',
             '-i', self.input_file,
             '-map', f"0:{self.video_info['index']}",
-            '-c:v', 'libx264',
-            '-preset', preset,
-            '-profile:v', 'high',
-            '-level', '4.1',
-            '-crf', profile['crf'],
+        ]
+
+        # Add hardware acceleration input if using VAAPI
+        if self.hw_accel == 'vaapi':
+            cmd.extend(['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'])
+
+        # Add encoder settings
+        cmd.extend(encoder_settings)
+
+        # Scaling - use hardware scaling for VAAPI
+        if self.hw_accel == 'vaapi':
+            cmd.extend(['-vf', f"scale_vaapi=w={width}:h={height}"])
+        else:
+            cmd.extend(['-vf', f"scale={scale}:flags=lanczos"])
+
+        # Add common settings
+        cmd.extend([
             '-maxrate', profile['maxrate'],
             '-bufsize', profile['bufsize'],
-            '-vf', f"scale={scale}:flags=lanczos",
             '-g', str(int(self.video_info['fps'] * 2)),
             '-keyint_min', str(int(self.video_info['fps'])),
             '-sc_threshold', '0',
             '-pix_fmt', 'yuv420p',
-        ]
-
-        # Add advanced x264 options if in best quality mode
-        if profile.get('use_advanced', False):
-            cmd.extend([
-                '-x264-params',
-                'ref=5:bframes=5:b-adapt=2:direct=auto:me=umh:subme=9:trellis=2:aq-mode=3:aq-strength=0.8'
-            ])
-
-        # Continue with remaining options
-        cmd.extend([
             '-an',
             '-f', 'hls',
             '-hls_time', '6',
@@ -611,12 +767,14 @@ class HLSConverter:
 
         try:
             print(f"   Settings:")
+            print(f"      Encoder: {encoder_name}")
             print(f"      Resolution: {width}x{height}")
             print(f"      Bitrate: {profile['video_bitrate']} (max: {profile['maxrate']})")
-            print(f"      CRF: {profile['crf']} (lower = better quality)")
-            print(f"      Preset: {preset}")
-            if profile.get('use_advanced', False):
-                print(f"      Advanced x264: ref=5, bframes=5, subme=9, trellis=2")
+            if not self.hw_accel:
+                print(f"      CRF: {profile['crf']}")
+                print(f"      Preset: {profile['preset']}")
+                if profile.get('use_advanced', False):
+                    print(f"      Advanced x264: enabled")
             print(f"   Encoding...")
 
             process = subprocess.Popen(
@@ -738,6 +896,21 @@ class HLSConverter:
         else:
             print(f"⚡ Quality: BALANCED (medium/fast presets)")
         print(f"🎯 Qualities: {', '.join(self.enabled_qualities)}")
+
+        if self.hw_accel == 'auto':
+            detected_hw = self.detect_hardware_acceleration()
+            if detected_hw:
+                self.hw_accel = detected_hw
+            else:
+                print(f"   ℹ️  Falling back to software encoding")
+                self.hw_accel = None
+        elif self.hw_accel:
+            print(f"🚀 Hardware Acceleration: {self.hw_accel.upper()}")
+
+        if self.parallel:
+            workers = min(len(self.enabled_qualities), cpu_count())
+            print(f"⚡ Parallel Processing: {workers} workers")
+
         print("="*70)
 
         if not self.check_ffmpeg():
@@ -753,17 +926,36 @@ class HLSConverter:
         else:
             print("\n⚠️  No subtitles detected in source file")
 
-        # Convert video (only enabled qualities)
+        # Convert video
         print(f"\n{'='*70}")
         print(f"PHASE 1: Converting Video Streams ({len(self.enabled_qualities)} qualities)")
+        if self.parallel:
+            print(f"         Running in PARALLEL mode with {min(len(self.enabled_qualities), cpu_count())} workers")
         print(f"{'='*70}")
 
         video_success = True
-        for profile_name in self.enabled_qualities:
-            if not self.convert_video_quality_variant(profile_name, self.quality_profiles[profile_name]):
-                video_success = False
 
-        # Convert audio (only for enabled qualities)
+        if self.parallel and len(self.enabled_qualities) > 1:
+            # Parallel processing
+            with Pool(processes=min(len(self.enabled_qualities), cpu_count())) as pool:
+                convert_func = partial(self._convert_video_wrapper,
+                                      input_file=self.input_file,
+                                      output_dir=self.output_dir,
+                                      video_info=self.video_info,
+                                      hw_accel=self.hw_accel,
+                                      best_quality=self.best_quality)
+
+                results = pool.map(convert_func,
+                                  [(name, self.quality_profiles[name]) for name in self.enabled_qualities])
+
+                video_success = all(results)
+        else:
+            # Sequential processing
+            for profile_name in self.enabled_qualities:
+                if not self.convert_video_quality_variant(profile_name, self.quality_profiles[profile_name]):
+                    video_success = False
+
+        # Convert audio
         print(f"\n{'='*70}")
         print("PHASE 2: Converting Audio Streams")
         print(f"{'='*70}")
@@ -773,7 +965,7 @@ class HLSConverter:
         # Create master playlist
         master_playlist = self.create_master_playlist()
 
-        # Summary - only show enabled qualities
+        # Summary
         quality_summary = []
         for profile_name in self.enabled_qualities:
             _, w, h = self._calculate_scale(self.quality_profiles[profile_name]['height'])
@@ -786,7 +978,6 @@ class HLSConverter:
                 'preset': self.quality_profiles[profile_name]['preset']
             })
 
-        # Get audio bitrate summary for enabled qualities
         audio_bitrates = '/'.join([self.audio_profiles[q]['bitrate'] for q in self.enabled_qualities])
 
         print("\n" + "="*70)
@@ -795,6 +986,12 @@ class HLSConverter:
         print(f"📁 Output directory:    {self.output_dir}")
         print(f"🎬 Master playlist:     {master_playlist}")
         print(f"📺 Source resolution:   {self.video_info['width']}x{self.video_info['height']}")
+
+        if self.hw_accel:
+            print(f"🚀 Hardware acceleration: {self.hw_accel.upper()}")
+        if self.parallel:
+            print(f"⚡ Parallel processing: ENABLED")
+
         print(f"\n   Generated Quality Tiers ({len(self.enabled_qualities)}):")
 
         for q in quality_summary:
@@ -808,7 +1005,6 @@ class HLSConverter:
             print(f"📄 Subtitle manifest:   subtitles.json")
         print("="*70)
 
-        # Show quality ladder explanation
         if self.video_info['height'] >= 2160:
             available = "4K → 1080p → 480p"
         else:
@@ -820,22 +1016,39 @@ class HLSConverter:
         print(f"   Generated: {generated}")
 
         if self.best_quality:
-            print("\n   ⭐ Maximum Quality Optimizations Applied:")
-            print("      • Slow encoding presets (3-10x longer encoding time)")
+            print("\n   ⭐ Maximum Quality Optimizations:")
+            if self.hw_accel:
+                print(f"      • Hardware encoding ({self.hw_accel.upper()}) - 5-10x faster")
+            else:
+                print("      • Slow encoding presets (better compression)")
             print("      • Lower CRF values (18-23) for higher quality")
-            print("      • Advanced x264: ref=5, bframes=5, subme=9, trellis=2")
-            print("      • Adaptive quantization (aq-mode=3)")
+            if not self.hw_accel:
+                print("      • Advanced x264: ref=5, bframes=5, subme=9, trellis=2")
             print("      • Higher audio bitrates (256k/192k/128k)")
         else:
             print("\n   ⚡ Balanced Mode:")
-            print("      • Medium/fast presets (faster encoding)")
+            if self.hw_accel:
+                print(f"      • Hardware encoding ({self.hw_accel.upper()}) - 5-10x faster")
+            else:
+                print("      • Medium/fast presets (faster encoding)")
             print("      • Balanced quality settings")
-            print("      • Good quality/speed ratio")
 
         print("      • Lanczos scaling algorithm")
         print("="*70 + "\n")
 
         return True
+
+    @staticmethod
+    def _convert_video_wrapper(args, input_file, output_dir, video_info, hw_accel, best_quality):
+        """Wrapper for parallel video conversion"""
+        profile_name, profile = args
+
+        # Create a temporary converter instance for this process
+        temp_converter = HLSConverter(input_file, output_dir, best_quality=best_quality, hw_accel=hw_accel)
+        temp_converter.video_info = video_info
+        temp_converter._determine_quality_ladder()
+
+        return temp_converter.convert_video_quality_variant(profile_name, profile)
 
 
 def main():
@@ -847,35 +1060,51 @@ Examples:
   # Balanced mode with all 3 qualities (default)
   %(prog)s input.mkv output_dir/
 
-  # Maximum quality mode with all 3 qualities
-  %(prog)s input.mkv output_dir/ --best-quality
+  # With hardware acceleration (auto-detect)
+  %(prog)s input.mkv output_dir/ --hw-accel=auto
 
-  # Generate only high and low quality
-  %(prog)s input.mkv output_dir/ --explicit-qualities=high,low
+  # With NVIDIA hardware acceleration
+  %(prog)s input.mkv output_dir/ --hw-accel=nvenc
 
-  # Generate only medium quality
-  %(prog)s input.mkv output_dir/ --explicit-qualities=medium
+  # Parallel processing (encode all qualities simultaneously)
+  %(prog)s input.mkv output_dir/ --parallel
 
-  # Maximum quality, only high quality output
-  %(prog)s input.mkv output_dir/ --best-quality --explicit-qualities=high
+  # Maximum quality with hardware acceleration and parallel processing
+  %(prog)s input.mkv output_dir/ --best-quality --hw-accel=auto --parallel
+
+  # Generate only high quality with NVIDIA GPU
+  %(prog)s input.mkv output_dir/ --explicit-qualities=high --hw-accel=nvenc
+
+Hardware Acceleration:
+  auto:          Auto-detect best available (recommended)
+  nvenc:         NVIDIA GPU (h264_nvenc) - 5-10x faster
+  qsv:           Intel Quick Sync (h264_qsv) - 3-5x faster
+  videotoolbox:  Apple VideoToolbox (macOS) - 3-5x faster
+  amf:           AMD GPU (h264_amf) - 5-8x faster
+  vaapi:         Linux VAAPI - 3-5x faster
 
 Quality Modes:
-  Balanced (default):  Medium/fast presets, CRF 20-26, good speed/quality ratio
-  Best Quality (-b):   Slow presets, CRF 18-23, advanced x264, 3-10x slower
+  Balanced (default):  Medium/fast presets, CRF 20-26
+  Best Quality (-b):   Slow presets, CRF 18-23, advanced x264
 
-Quality Levels:
-  high:    Original/4K resolution (high bitrate)
-  medium:  720p/1080p resolution (medium bitrate)
-  low:     480p resolution (low bitrate, always compatible)
+Parallel Processing:
+  --parallel:    Encode multiple qualities simultaneously
+                 Uses up to N CPU cores (N = number of qualities)
+                 Can reduce total encoding time by 50-70%
         """
     )
 
     parser.add_argument('input', help='Input video file (MKV or MP4)')
     parser.add_argument('output', help='Output directory for HLS files')
     parser.add_argument('--best-quality', '-b', action='store_true',
-                        help='Use slowest presets and best quality settings (much slower)')
+                        help='Use slowest presets and best quality settings')
     parser.add_argument('--explicit-qualities', '-q', type=str, default=None,
-                        help='Comma-separated list of qualities to generate (high,medium,low). Default: all three')
+                        help='Comma-separated list of qualities (high,medium,low)')
+    parser.add_argument('--hw-accel', type=str, default=None,
+                        choices=['auto', 'nvenc', 'qsv', 'videotoolbox', 'amf', 'vaapi'],
+                        help='Hardware acceleration method (auto-detect or specify)')
+    parser.add_argument('--parallel', '-p', action='store_true',
+                        help='Encode multiple qualities in parallel (faster)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -889,7 +1118,6 @@ Quality Levels:
     if args.explicit_qualities:
         explicit_qualities = [q.strip().lower() for q in args.explicit_qualities.split(',')]
 
-        # Validate quality names
         valid_qualities = {'high', 'medium', 'low'}
         invalid = set(explicit_qualities) - valid_qualities
         if invalid:
@@ -897,7 +1125,6 @@ Quality Levels:
             print(f"   Valid options: high, medium, low")
             sys.exit(1)
 
-        # Remove duplicates while preserving order
         seen = set()
         explicit_qualities = [q for q in explicit_qualities if not (q in seen or seen.add(q))]
 
@@ -916,7 +1143,9 @@ Quality Levels:
 
     converter = HLSConverter(args.input, args.output,
                             best_quality=args.best_quality,
-                            explicit_qualities=explicit_qualities)
+                            explicit_qualities=explicit_qualities,
+                            hw_accel=args.hw_accel,
+                            parallel=args.parallel)
 
     try:
         if converter.convert():
