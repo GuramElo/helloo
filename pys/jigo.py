@@ -4,7 +4,7 @@ HLS Video Converter with Stable Subtitle Support
 Converts MKV/MP4 files to HLS format with multiple quality variants,
 separate audio tracks, and native browser-compatible subtitles.
 
-VERSION 4.4: Optional maximum quality mode via --best-quality flag
+VERSION 4.5: Optional explicit quality selection via --explicit-qualities flag
 """
 
 import os
@@ -17,11 +17,17 @@ from typing import Dict, List, Tuple
 import re
 
 class HLSConverter:
-    def __init__(self, input_file: str, output_dir: str, best_quality: bool = False):
+    def __init__(self, input_file: str, output_dir: str, best_quality: bool = False, explicit_qualities: List[str] = None):
         self.input_file = input_file
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.best_quality = best_quality
+
+        # Determine which qualities to generate
+        if explicit_qualities:
+            self.enabled_qualities = explicit_qualities
+        else:
+            self.enabled_qualities = ['high', 'medium', 'low']  # Default: all qualities
 
         # Quality profiles will be determined after probing the video
         self.quality_profiles = {}
@@ -258,6 +264,14 @@ class HLSConverter:
                 }
                 print(f"   📊 Quality Ladder: {source_height}p (original) → 720p → 480p")
                 print(f"   ⚙️  Encoding Mode: ⚡ BALANCED (medium/fast presets)")
+
+        # Show which qualities will be generated
+        enabled_resolutions = []
+        for quality in self.enabled_qualities:
+            _, w, h = self._calculate_scale(self.quality_profiles[quality]['height'])
+            enabled_resolutions.append(f"{quality}={w}x{h}")
+
+        print(f"   🎯 Enabled Qualities: {', '.join(enabled_resolutions)}")
 
     def probe_file(self) -> bool:
         """Probe input file to get stream information"""
@@ -630,19 +644,19 @@ class HLSConverter:
             return False
 
     def convert_all_audio_tracks(self):
-        """Convert all audio tracks for all quality levels"""
+        """Convert all audio tracks for enabled quality levels only"""
         if not self.audio_streams:
             print("\n⚠️  No audio streams found - creating video-only streams")
             return True
 
         print(f"\n{'='*70}")
-        print(f"🔊 Converting {len(self.audio_streams)} audio track(s) x 3 qualities")
+        print(f"🔊 Converting {len(self.audio_streams)} audio track(s) x {len(self.enabled_qualities)} qualities")
         print(f"{'='*70}")
 
         success = True
         for i, audio in enumerate(self.audio_streams):
             print(f"\n📻 Audio Track #{i}: {audio['title']} ({audio['language']})")
-            for quality in ['high', 'medium', 'low']:
+            for quality in self.enabled_qualities:
                 if not self.convert_audio_track(i, audio, quality):
                     success = False
                     print(f"   ⚠️  Warning: Audio {i} ({quality}) conversion failed")
@@ -659,13 +673,13 @@ class HLSConverter:
             f.write("#EXTM3U\n")
             f.write("#EXT-X-VERSION:6\n\n")
 
-            # Audio track declarations
+            # Audio track declarations (only for enabled qualities)
             if self.audio_streams:
                 f.write("# Audio tracks\n")
                 for i, audio in enumerate(self.audio_streams):
                     safe_lang = re.sub(r'[^\w\-]', '_', audio['language'])
 
-                    for quality_level in ['high', 'medium', 'low']:
+                    for quality_level in self.enabled_qualities:
                         audio_file = self.output_dir / f"audio_{i}_{safe_lang}_{quality_level}.m3u8"
                         if audio_file.exists():
                             f.write(f'#EXT-X-MEDIA:TYPE=AUDIO,')
@@ -679,9 +693,12 @@ class HLSConverter:
 
                 f.write("\n")
 
-            # Video variants (sorted by quality: high, medium, low)
+            # Video variants (only for enabled qualities, sorted by quality: high, medium, low)
             f.write("# Video variants\n")
             for profile_name in ['high', 'medium', 'low']:
+                if profile_name not in self.enabled_qualities:
+                    continue
+
                 profile = self.quality_profiles[profile_name]
                 audio_profile = self.audio_profiles[profile_name]
                 scale, width, height = self._calculate_scale(profile['height'])
@@ -720,6 +737,7 @@ class HLSConverter:
             print(f"⭐ Quality: MAXIMUM (slow presets, advanced x264)")
         else:
             print(f"⚡ Quality: BALANCED (medium/fast presets)")
+        print(f"🎯 Qualities: {', '.join(self.enabled_qualities)}")
         print("="*70)
 
         if not self.check_ffmpeg():
@@ -735,17 +753,17 @@ class HLSConverter:
         else:
             print("\n⚠️  No subtitles detected in source file")
 
-        # Convert video
+        # Convert video (only enabled qualities)
         print(f"\n{'='*70}")
-        print("PHASE 1: Converting Video Streams (3 adaptive qualities)")
+        print(f"PHASE 1: Converting Video Streams ({len(self.enabled_qualities)} qualities)")
         print(f"{'='*70}")
 
         video_success = True
-        for profile_name in ['high', 'medium', 'low']:
+        for profile_name in self.enabled_qualities:
             if not self.convert_video_quality_variant(profile_name, self.quality_profiles[profile_name]):
                 video_success = False
 
-        # Convert audio
+        # Convert audio (only for enabled qualities)
         print(f"\n{'='*70}")
         print("PHASE 2: Converting Audio Streams")
         print(f"{'='*70}")
@@ -755,13 +773,21 @@ class HLSConverter:
         # Create master playlist
         master_playlist = self.create_master_playlist()
 
-        # Summary
-        _, high_w, high_h = self._calculate_scale(self.quality_profiles['high']['height'])
-        _, med_w, med_h = self._calculate_scale(self.quality_profiles['medium']['height'])
-        _, low_w, low_h = self._calculate_scale(self.quality_profiles['low']['height'])
+        # Summary - only show enabled qualities
+        quality_summary = []
+        for profile_name in self.enabled_qualities:
+            _, w, h = self._calculate_scale(self.quality_profiles[profile_name]['height'])
+            quality_summary.append({
+                'name': profile_name,
+                'width': w,
+                'height': h,
+                'bitrate': self.quality_profiles[profile_name]['video_bitrate'],
+                'crf': self.quality_profiles[profile_name]['crf'],
+                'preset': self.quality_profiles[profile_name]['preset']
+            })
 
-        # Get audio bitrate summary
-        audio_bitrates = f"{self.audio_profiles['high']['bitrate']}/{self.audio_profiles['medium']['bitrate']}/{self.audio_profiles['low']['bitrate']}"
+        # Get audio bitrate summary for enabled qualities
+        audio_bitrates = '/'.join([self.audio_profiles[q]['bitrate'] for q in self.enabled_qualities])
 
         print("\n" + "="*70)
         print(" "*20 + "✅ CONVERSION COMPLETED!")
@@ -769,14 +795,14 @@ class HLSConverter:
         print(f"📁 Output directory:    {self.output_dir}")
         print(f"🎬 Master playlist:     {master_playlist}")
         print(f"📺 Source resolution:   {self.video_info['width']}x{self.video_info['height']}")
-        print(f"\n   Quality Ladder:")
-        print(f"   • High:   {high_w}x{high_h} @ {self.quality_profiles['high']['video_bitrate']}, "
-              f"CRF {self.quality_profiles['high']['crf']}, preset={self.quality_profiles['high']['preset']}")
-        print(f"   • Medium: {med_w}x{med_h} @ {self.quality_profiles['medium']['video_bitrate']}, "
-              f"CRF {self.quality_profiles['medium']['crf']}, preset={self.quality_profiles['medium']['preset']}")
-        print(f"   • Low:    {low_w}x{low_h} @ {self.quality_profiles['low']['video_bitrate']}, "
-              f"CRF {self.quality_profiles['low']['crf']}, preset={self.quality_profiles['low']['preset']}")
-        print(f"\n🔊 Audio tracks:        {len(self.audio_streams)} x 3 qualities ({audio_bitrates})")
+        print(f"\n   Generated Quality Tiers ({len(self.enabled_qualities)}):")
+
+        for q in quality_summary:
+            label = q['name'].capitalize()
+            print(f"   • {label:6} {q['width']}x{q['height']} @ {q['bitrate']}, "
+                  f"CRF {q['crf']}, preset={q['preset']}")
+
+        print(f"\n🔊 Audio tracks:        {len(self.audio_streams)} x {len(self.enabled_qualities)} qualities ({audio_bitrates})")
         print(f"💬 Subtitle tracks:     {len(self.converted_subtitles)} converted")
         if self.converted_subtitles:
             print(f"📄 Subtitle manifest:   subtitles.json")
@@ -784,9 +810,14 @@ class HLSConverter:
 
         # Show quality ladder explanation
         if self.video_info['height'] >= 2160:
-            print("\n💡 Quality Ladder: 4K → 1080p → 480p")
+            available = "4K → 1080p → 480p"
         else:
-            print("\n💡 Quality Ladder: Original → 720p → 480p")
+            available = "Original → 720p → 480p"
+
+        generated = ' → '.join([f"{self.enabled_qualities[i]}" for i in range(len(self.enabled_qualities))])
+
+        print(f"\n💡 Available Qualities: {available}")
+        print(f"   Generated: {generated}")
 
         if self.best_quality:
             print("\n   ⭐ Maximum Quality Optimizations Applied:")
@@ -802,7 +833,6 @@ class HLSConverter:
             print("      • Good quality/speed ratio")
 
         print("      • Lanczos scaling algorithm")
-        print("      • 480p always available for compatibility")
         print("="*70 + "\n")
 
         return True
@@ -814,15 +844,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Balanced mode (default, faster encoding)
+  # Balanced mode with all 3 qualities (default)
   %(prog)s input.mkv output_dir/
 
-  # Maximum quality mode (slower, best quality)
+  # Maximum quality mode with all 3 qualities
   %(prog)s input.mkv output_dir/ --best-quality
+
+  # Generate only high and low quality
+  %(prog)s input.mkv output_dir/ --explicit-qualities=high,low
+
+  # Generate only medium quality
+  %(prog)s input.mkv output_dir/ --explicit-qualities=medium
+
+  # Maximum quality, only high quality output
+  %(prog)s input.mkv output_dir/ --best-quality --explicit-qualities=high
 
 Quality Modes:
   Balanced (default):  Medium/fast presets, CRF 20-26, good speed/quality ratio
-  Best Quality:        Slow presets, CRF 18-23, advanced x264, 3-10x slower
+  Best Quality (-b):   Slow presets, CRF 18-23, advanced x264, 3-10x slower
+
+Quality Levels:
+  high:    Original/4K resolution (high bitrate)
+  medium:  720p/1080p resolution (medium bitrate)
+  low:     480p resolution (low bitrate, always compatible)
         """
     )
 
@@ -830,6 +874,8 @@ Quality Modes:
     parser.add_argument('output', help='Output directory for HLS files')
     parser.add_argument('--best-quality', '-b', action='store_true',
                         help='Use slowest presets and best quality settings (much slower)')
+    parser.add_argument('--explicit-qualities', '-q', type=str, default=None,
+                        help='Comma-separated list of qualities to generate (high,medium,low). Default: all three')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -837,6 +883,27 @@ Quality Modes:
     if not os.path.isfile(args.input):
         print(f"❌ ERROR: Input file does not exist: {args.input}")
         sys.exit(1)
+
+    # Parse explicit qualities if provided
+    explicit_qualities = None
+    if args.explicit_qualities:
+        explicit_qualities = [q.strip().lower() for q in args.explicit_qualities.split(',')]
+
+        # Validate quality names
+        valid_qualities = {'high', 'medium', 'low'}
+        invalid = set(explicit_qualities) - valid_qualities
+        if invalid:
+            print(f"❌ ERROR: Invalid quality level(s): {', '.join(invalid)}")
+            print(f"   Valid options: high, medium, low")
+            sys.exit(1)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        explicit_qualities = [q for q in explicit_qualities if not (q in seen or seen.add(q))]
+
+        if not explicit_qualities:
+            print(f"❌ ERROR: No valid qualities specified")
+            sys.exit(1)
 
     valid_extensions = ['.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm']
     file_ext = os.path.splitext(args.input)[1].lower()
@@ -847,7 +914,9 @@ Quality Modes:
         if response.lower() != 'y':
             sys.exit(1)
 
-    converter = HLSConverter(args.input, args.output, best_quality=args.best_quality)
+    converter = HLSConverter(args.input, args.output,
+                            best_quality=args.best_quality,
+                            explicit_qualities=explicit_qualities)
 
     try:
         if converter.convert():
