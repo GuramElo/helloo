@@ -24,3 +24,5 @@ python script.py input.mkv output/ --parallel  # ✅ Excellent!
 python script.py input.mkv output/ --hw-accel=videotoolbox  # no --parallel
 
 --hw-accel=auto
+
+python3 jigo.py "movie.mkv" "output/" --force-reencode --hw-accel=auto
