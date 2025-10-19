@@ -4,7 +4,7 @@ HLS Video Converter with Stable Subtitle Support
 Converts MKV/MP4 files to HLS format with multiple quality variants,
 separate audio tracks, and native browser-compatible subtitles.
 
-VERSION 4: Subtitles are completely separate from HLS (most stable approach)
+VERSION 4.4: Optional maximum quality mode via --best-quality flag
 """
 
 import os
@@ -17,32 +17,33 @@ from typing import Dict, List, Tuple
 import re
 
 class HLSConverter:
-    def __init__(self, input_file: str, output_dir: str):
+    def __init__(self, input_file: str, output_dir: str, best_quality: bool = False):
         self.input_file = input_file
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.best_quality = best_quality
 
-        # Quality profiles for video
-        self.quality_profiles = {
-            'high': {
-                'name': 'high',
-                'height': 1080,
-                'video_bitrate': '5000k',
-                'maxrate': '5350k',
-                'bufsize': '7500k',
-                'crf': '19',
-            },
-        }
+        # Quality profiles will be determined after probing the video
+        self.quality_profiles = {}
 
-        # Audio profiles
-        self.audio_profiles = {
-            'high': {'bitrate': '192k', 'sample_rate': '48000'},
-        }
+        # Audio profiles - depend on quality mode
+        if best_quality:
+            self.audio_profiles = {
+                'high': {'bitrate': '256k', 'sample_rate': '48000'},
+                'medium': {'bitrate': '192k', 'sample_rate': '48000'},
+                'low': {'bitrate': '128k', 'sample_rate': '48000'},
+            }
+        else:
+            self.audio_profiles = {
+                'high': {'bitrate': '192k', 'sample_rate': '48000'},
+                'medium': {'bitrate': '128k', 'sample_rate': '48000'},
+                'low': {'bitrate': '96k', 'sample_rate': '48000'},
+            }
 
         self.video_info = None
         self.audio_streams = []
         self.subtitle_streams = []
-        self.converted_subtitles = []  # Track successfully converted subtitles
+        self.converted_subtitles = []
 
     def check_ffmpeg(self) -> bool:
         """Check if ffmpeg and ffprobe are available"""
@@ -59,6 +60,204 @@ class HLSConverter:
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("ERROR: ffmpeg and ffprobe must be installed and in PATH")
             return False
+
+    def _determine_quality_ladder(self):
+        """
+        Determine quality ladder based on source resolution:
+
+        4K (≥2160p):     high=4K,     medium=1080p, low=480p
+        Under 4K:        high=Original, medium=720p,  low=480p
+        """
+        source_height = self.video_info['height']
+
+        print(f"\n🎯 Determining quality ladder for {source_height}p source...")
+
+        if source_height >= 2160:  # 4K or higher
+            if self.best_quality:
+                # Maximum quality settings
+                self.quality_profiles = {
+                    'high': {
+                        'name': 'high',
+                        'height': source_height,
+                        'video_bitrate': '18000k',
+                        'maxrate': '20000k',
+                        'bufsize': '27000k',
+                        'crf': '18',
+                        'preset': 'slow',
+                        'use_advanced': True,
+                    },
+                    'medium': {
+                        'name': 'medium',
+                        'height': 1080,
+                        'video_bitrate': '6000k',
+                        'maxrate': '6500k',
+                        'bufsize': '9000k',
+                        'crf': '21',
+                        'preset': 'slow',
+                        'use_advanced': True,
+                    },
+                    'low': {
+                        'name': 'low',
+                        'height': 480,
+                        'video_bitrate': '1800k',
+                        'maxrate': '2000k',
+                        'bufsize': '2700k',
+                        'crf': '23',
+                        'preset': 'medium',
+                        'use_advanced': True,
+                    },
+                }
+                print(f"   📊 4K Quality Ladder: {source_height}p → 1080p → 480p")
+                print(f"   ⚙️  Encoding Mode: ⭐ MAXIMUM QUALITY (slow presets + advanced x264)")
+            else:
+                # Fast mode settings
+                self.quality_profiles = {
+                    'high': {
+                        'name': 'high',
+                        'height': source_height,
+                        'video_bitrate': '16000k',
+                        'maxrate': '17000k',
+                        'bufsize': '24000k',
+                        'crf': '20',
+                        'preset': 'medium',
+                        'use_advanced': False,
+                    },
+                    'medium': {
+                        'name': 'medium',
+                        'height': 1080,
+                        'video_bitrate': '5000k',
+                        'maxrate': '5350k',
+                        'bufsize': '7500k',
+                        'crf': '23',
+                        'preset': 'medium',
+                        'use_advanced': False,
+                    },
+                    'low': {
+                        'name': 'low',
+                        'height': 480,
+                        'video_bitrate': '1400k',
+                        'maxrate': '1500k',
+                        'bufsize': '2100k',
+                        'crf': '26',
+                        'preset': 'fast',
+                        'use_advanced': False,
+                    },
+                }
+                print(f"   📊 4K Quality Ladder: {source_height}p → 1080p → 480p")
+                print(f"   ⚙️  Encoding Mode: ⚡ BALANCED (medium/fast presets)")
+
+        else:  # Under 4K - use original resolution
+            # Calculate appropriate bitrate based on source resolution
+            if source_height >= 1080:
+                if self.best_quality:
+                    high_bitrate = '6000k'
+                    high_maxrate = '6500k'
+                    high_bufsize = '9000k'
+                    high_crf = '19'
+                    high_preset = 'slow'
+                else:
+                    high_bitrate = '5000k'
+                    high_maxrate = '5350k'
+                    high_bufsize = '7500k'
+                    high_crf = '21'
+                    high_preset = 'medium'
+            elif source_height >= 720:
+                if self.best_quality:
+                    high_bitrate = '3500k'
+                    high_maxrate = '3800k'
+                    high_bufsize = '5200k'
+                    high_crf = '20'
+                    high_preset = 'slow'
+                else:
+                    high_bitrate = '2800k'
+                    high_maxrate = '3000k'
+                    high_bufsize = '4200k'
+                    high_crf = '22'
+                    high_preset = 'medium'
+            else:  # 480p or lower
+                if self.best_quality:
+                    high_bitrate = '1800k'
+                    high_maxrate = '2000k'
+                    high_bufsize = '2700k'
+                    high_crf = '21'
+                    high_preset = 'medium'
+                else:
+                    high_bitrate = '1400k'
+                    high_maxrate = '1500k'
+                    high_bufsize = '2100k'
+                    high_crf = '23'
+                    high_preset = 'fast'
+
+            if self.best_quality:
+                self.quality_profiles = {
+                    'high': {
+                        'name': 'high',
+                        'height': source_height,
+                        'video_bitrate': high_bitrate,
+                        'maxrate': high_maxrate,
+                        'bufsize': high_bufsize,
+                        'crf': high_crf,
+                        'preset': high_preset,
+                        'use_advanced': True,
+                    },
+                    'medium': {
+                        'name': 'medium',
+                        'height': 720,
+                        'video_bitrate': '3500k',
+                        'maxrate': '3800k',
+                        'bufsize': '5200k',
+                        'crf': '21',
+                        'preset': 'slow',
+                        'use_advanced': True,
+                    },
+                    'low': {
+                        'name': 'low',
+                        'height': 480,
+                        'video_bitrate': '1800k',
+                        'maxrate': '2000k',
+                        'bufsize': '2700k',
+                        'crf': '23',
+                        'preset': 'medium',
+                        'use_advanced': True,
+                    },
+                }
+                print(f"   📊 Quality Ladder: {source_height}p (original) → 720p → 480p")
+                print(f"   ⚙️  Encoding Mode: ⭐ MAXIMUM QUALITY (slow presets + advanced x264)")
+            else:
+                self.quality_profiles = {
+                    'high': {
+                        'name': 'high',
+                        'height': source_height,
+                        'video_bitrate': high_bitrate,
+                        'maxrate': high_maxrate,
+                        'bufsize': high_bufsize,
+                        'crf': high_crf,
+                        'preset': high_preset,
+                        'use_advanced': False,
+                    },
+                    'medium': {
+                        'name': 'medium',
+                        'height': 720,
+                        'video_bitrate': '2800k',
+                        'maxrate': '3000k',
+                        'bufsize': '4200k',
+                        'crf': '23',
+                        'preset': 'medium',
+                        'use_advanced': False,
+                    },
+                    'low': {
+                        'name': 'low',
+                        'height': 480,
+                        'video_bitrate': '1400k',
+                        'maxrate': '1500k',
+                        'bufsize': '2100k',
+                        'crf': '26',
+                        'preset': 'fast',
+                        'use_advanced': False,
+                    },
+                }
+                print(f"   📊 Quality Ladder: {source_height}p (original) → 720p → 480p")
+                print(f"   ⚙️  Encoding Mode: ⚡ BALANCED (medium/fast presets)")
 
     def probe_file(self) -> bool:
         """Probe input file to get stream information"""
@@ -147,10 +346,26 @@ class HLSConverter:
                 print("\n❌ ERROR: No video stream found in input file")
                 return False
 
+            # Determine quality ladder based on source resolution
+            self._determine_quality_ladder()
+
             print(f"\n{'='*70}")
             print(f"📹 Video: {self.video_info['codec']} "
                   f"{self.video_info['width']}x{self.video_info['height']} "
                   f"@ {self.video_info['fps']} fps")
+
+            # Show resolution category
+            if self.video_info['height'] >= 2160:
+                print(f"   🎬 Resolution Category: 4K/UHD")
+            elif self.video_info['height'] >= 1440:
+                print(f"   🎬 Resolution Category: 2K/QHD")
+            elif self.video_info['height'] >= 1080:
+                print(f"   🎬 Resolution Category: Full HD")
+            elif self.video_info['height'] >= 720:
+                print(f"   🎬 Resolution Category: HD")
+            else:
+                print(f"   🎬 Resolution Category: SD")
+
             print(f"{'='*70}")
 
             if self.audio_streams:
@@ -258,7 +473,6 @@ class HLSConverter:
                     print(f"       ✅ Successfully converted ({size_kb:.1f} KB)")
                     converted_count += 1
 
-                    # Store info about successfully converted subtitle
                     self.converted_subtitles.append({
                         'file': output_vtt.name,
                         'language': subtitle['language'],
@@ -339,13 +553,15 @@ class HLSConverter:
 
         scale, width, height = self._calculate_scale(profile['height'])
         output_name = f"video_{profile_name}"
+        preset = profile['preset']
 
+        # Build encoding command
         cmd = [
             'ffmpeg',
             '-i', self.input_file,
             '-map', f"0:{self.video_info['index']}",
             '-c:v', 'libx264',
-            '-preset', 'veryfast',
+            '-preset', preset,
             '-profile:v', 'high',
             '-level', '4.1',
             '-crf', profile['crf'],
@@ -356,6 +572,17 @@ class HLSConverter:
             '-keyint_min', str(int(self.video_info['fps'])),
             '-sc_threshold', '0',
             '-pix_fmt', 'yuv420p',
+        ]
+
+        # Add advanced x264 options if in best quality mode
+        if profile.get('use_advanced', False):
+            cmd.extend([
+                '-x264-params',
+                'ref=5:bframes=5:b-adapt=2:direct=auto:me=umh:subme=9:trellis=2:aq-mode=3:aq-strength=0.8'
+            ])
+
+        # Continue with remaining options
+        cmd.extend([
             '-an',
             '-f', 'hls',
             '-hls_time', '6',
@@ -366,11 +593,17 @@ class HLSConverter:
             '-stats',
             '-y',
             str(self.output_dir / f"{output_name}.m3u8")
-        ]
+        ])
 
         try:
-            print(f"   Settings: {width}x{height}, bitrate={profile['video_bitrate']}, CRF={profile['crf']}")
-            print(f"   Encoding (this may take a while)...")
+            print(f"   Settings:")
+            print(f"      Resolution: {width}x{height}")
+            print(f"      Bitrate: {profile['video_bitrate']} (max: {profile['maxrate']})")
+            print(f"      CRF: {profile['crf']} (lower = better quality)")
+            print(f"      Preset: {preset}")
+            if profile.get('use_advanced', False):
+                print(f"      Advanced x264: ref=5, bframes=5, subme=9, trellis=2")
+            print(f"   Encoding...")
 
             process = subprocess.Popen(
                 cmd,
@@ -403,13 +636,13 @@ class HLSConverter:
             return True
 
         print(f"\n{'='*70}")
-        print(f"🔊 Converting {len(self.audio_streams)} audio track(s)")
+        print(f"🔊 Converting {len(self.audio_streams)} audio track(s) x 3 qualities")
         print(f"{'='*70}")
 
         success = True
         for i, audio in enumerate(self.audio_streams):
             print(f"\n📻 Audio Track #{i}: {audio['title']} ({audio['language']})")
-            for quality in ['high']:
+            for quality in ['high', 'medium', 'low']:
                 if not self.convert_audio_track(i, audio, quality):
                     success = False
                     print(f"   ⚠️  Warning: Audio {i} ({quality}) conversion failed")
@@ -432,7 +665,7 @@ class HLSConverter:
                 for i, audio in enumerate(self.audio_streams):
                     safe_lang = re.sub(r'[^\w\-]', '_', audio['language'])
 
-                    for quality_level in ['high']:
+                    for quality_level in ['high', 'medium', 'low']:
                         audio_file = self.output_dir / f"audio_{i}_{safe_lang}_{quality_level}.m3u8"
                         if audio_file.exists():
                             f.write(f'#EXT-X-MEDIA:TYPE=AUDIO,')
@@ -446,12 +679,9 @@ class HLSConverter:
 
                 f.write("\n")
 
-            # NOTE: NO subtitle references in HLS manifest
-            # Subtitles are handled separately via subtitles.json
-
-            # Video variants
+            # Video variants (sorted by quality: high, medium, low)
             f.write("# Video variants\n")
-            for profile_name in ['high']:
+            for profile_name in ['high', 'medium', 'low']:
                 profile = self.quality_profiles[profile_name]
                 audio_profile = self.audio_profiles[profile_name]
                 scale, width, height = self._calculate_scale(profile['height'])
@@ -473,7 +703,6 @@ class HLSConverter:
                     if self.audio_streams:
                         f.write(f',AUDIO="audio-{profile_name}"')
 
-                    # NO subtitle reference here
                     f.write(f'\n{video_playlist}\n')
 
         print(f"   ✓ Master playlist created: {master_file}")
@@ -481,11 +710,16 @@ class HLSConverter:
 
     def convert(self) -> bool:
         """Main conversion process"""
+        mode_label = "Maximum Quality Mode" if self.best_quality else "Balanced Mode"
         print("\n" + "="*70)
-        print(" "*15 + "🎥 HLS VIDEO CONVERTER (Stable Subtitles)")
+        print(f" "*10 + f"🎥 HLS VIDEO CONVERTER ({mode_label})")
         print("="*70)
         print(f"📁 Input:  {self.input_file}")
         print(f"📁 Output: {self.output_dir}")
+        if self.best_quality:
+            print(f"⭐ Quality: MAXIMUM (slow presets, advanced x264)")
+        else:
+            print(f"⚡ Quality: BALANCED (medium/fast presets)")
         print("="*70)
 
         if not self.check_ffmpeg():
@@ -503,11 +737,11 @@ class HLSConverter:
 
         # Convert video
         print(f"\n{'='*70}")
-        print("PHASE 1: Converting Video Streams")
+        print("PHASE 1: Converting Video Streams (3 adaptive qualities)")
         print(f"{'='*70}")
 
         video_success = True
-        for profile_name in ['high']:
+        for profile_name in ['high', 'medium', 'low']:
             if not self.convert_video_quality_variant(profile_name, self.quality_profiles[profile_name]):
                 video_success = False
 
@@ -522,22 +756,53 @@ class HLSConverter:
         master_playlist = self.create_master_playlist()
 
         # Summary
+        _, high_w, high_h = self._calculate_scale(self.quality_profiles['high']['height'])
+        _, med_w, med_h = self._calculate_scale(self.quality_profiles['medium']['height'])
+        _, low_w, low_h = self._calculate_scale(self.quality_profiles['low']['height'])
+
+        # Get audio bitrate summary
+        audio_bitrates = f"{self.audio_profiles['high']['bitrate']}/{self.audio_profiles['medium']['bitrate']}/{self.audio_profiles['low']['bitrate']}"
+
         print("\n" + "="*70)
         print(" "*20 + "✅ CONVERSION COMPLETED!")
         print("="*70)
         print(f"📁 Output directory:    {self.output_dir}")
         print(f"🎬 Master playlist:     {master_playlist}")
-        print(f"📺 Video qualities:     1 (high: 1080p)")
-        print(f"🔊 Audio tracks:        {len(self.audio_streams)}")
+        print(f"📺 Source resolution:   {self.video_info['width']}x{self.video_info['height']}")
+        print(f"\n   Quality Ladder:")
+        print(f"   • High:   {high_w}x{high_h} @ {self.quality_profiles['high']['video_bitrate']}, "
+              f"CRF {self.quality_profiles['high']['crf']}, preset={self.quality_profiles['high']['preset']}")
+        print(f"   • Medium: {med_w}x{med_h} @ {self.quality_profiles['medium']['video_bitrate']}, "
+              f"CRF {self.quality_profiles['medium']['crf']}, preset={self.quality_profiles['medium']['preset']}")
+        print(f"   • Low:    {low_w}x{low_h} @ {self.quality_profiles['low']['video_bitrate']}, "
+              f"CRF {self.quality_profiles['low']['crf']}, preset={self.quality_profiles['low']['preset']}")
+        print(f"\n🔊 Audio tracks:        {len(self.audio_streams)} x 3 qualities ({audio_bitrates})")
         print(f"💬 Subtitle tracks:     {len(self.converted_subtitles)} converted")
         if self.converted_subtitles:
             print(f"📄 Subtitle manifest:   subtitles.json")
-            print(f"   Subtitles are SEPARATE from HLS (native browser rendering)")
         print("="*70)
-        print("\n💡 Implementation Notes:")
-        print("   • Subtitles are NOT in HLS manifest (better compatibility)")
-        print("   • Use subtitles.json to load subtitle tracks in HTML")
-        print("   • Subtitles render via native HTML5 <track> elements")
+
+        # Show quality ladder explanation
+        if self.video_info['height'] >= 2160:
+            print("\n💡 Quality Ladder: 4K → 1080p → 480p")
+        else:
+            print("\n💡 Quality Ladder: Original → 720p → 480p")
+
+        if self.best_quality:
+            print("\n   ⭐ Maximum Quality Optimizations Applied:")
+            print("      • Slow encoding presets (3-10x longer encoding time)")
+            print("      • Lower CRF values (18-23) for higher quality")
+            print("      • Advanced x264: ref=5, bframes=5, subme=9, trellis=2")
+            print("      • Adaptive quantization (aq-mode=3)")
+            print("      • Higher audio bitrates (256k/192k/128k)")
+        else:
+            print("\n   ⚡ Balanced Mode:")
+            print("      • Medium/fast presets (faster encoding)")
+            print("      • Balanced quality settings")
+            print("      • Good quality/speed ratio")
+
+        print("      • Lanczos scaling algorithm")
+        print("      • 480p always available for compatibility")
         print("="*70 + "\n")
 
         return True
@@ -545,11 +810,26 @@ class HLSConverter:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert MKV/MP4 to HLS with stable subtitle support',
+        description='Convert MKV/MP4 to HLS with adaptive quality streaming',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Balanced mode (default, faster encoding)
+  %(prog)s input.mkv output_dir/
+
+  # Maximum quality mode (slower, best quality)
+  %(prog)s input.mkv output_dir/ --best-quality
+
+Quality Modes:
+  Balanced (default):  Medium/fast presets, CRF 20-26, good speed/quality ratio
+  Best Quality:        Slow presets, CRF 18-23, advanced x264, 3-10x slower
+        """
     )
 
     parser.add_argument('input', help='Input video file (MKV or MP4)')
     parser.add_argument('output', help='Output directory for HLS files')
+    parser.add_argument('--best-quality', '-b', action='store_true',
+                        help='Use slowest presets and best quality settings (much slower)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -567,7 +847,7 @@ def main():
         if response.lower() != 'y':
             sys.exit(1)
 
-    converter = HLSConverter(args.input, args.output)
+    converter = HLSConverter(args.input, args.output, best_quality=args.best_quality)
 
     try:
         if converter.convert():

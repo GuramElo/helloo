@@ -1,0 +1,1 @@
+python script.py input.mkv output/ --best-quality --explicit-qualities=high,low
