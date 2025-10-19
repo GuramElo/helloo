@@ -4,7 +4,7 @@ HLS Video Converter with Stable Subtitle Support
 Converts MKV/MP4 files to HLS format with multiple quality variants,
 separate audio tracks, and native browser-compatible subtitles.
 
-VERSION 5.0: Hardware acceleration + parallel processing support
+VERSION 5.1: Hardware acceleration + parallel processing + smart efficiency warnings
 """
 
 import os
@@ -61,13 +61,13 @@ class HLSConverter:
         """Check if ffmpeg and ffprobe are available"""
         try:
             subprocess.run(['ffmpeg', '-version'],
-                                     stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE,
-                                     check=True)
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE,
+                         check=True)
             subprocess.run(['ffprobe', '-version'],
-                                     stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE,
-                                     check=True)
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE,
+                         check=True)
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("ERROR: ffmpeg and ffprobe must be installed and in PATH")
@@ -115,6 +115,68 @@ class HLSConverter:
         except subprocess.CalledProcessError:
             print(f"   ⚠️  Could not detect hardware acceleration")
             return None
+
+    def _check_parallel_efficiency(self):
+        """Warn if parallel processing won't help much with current hardware"""
+
+        if self.hw_accel == 'nvenc':
+            # Check if it's a consumer GeForce card
+            try:
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                gpu_name = result.stdout.strip().lower()
+
+                # Workstation GPUs support unlimited sessions
+                is_workstation = any(x in gpu_name for x in [
+                    'quadro', 'tesla', 'rtx a', 'a100', 'a40', 'a6000', 'a5000', 'a4000',
+                    'a2000', 't4', 't1000', 'p4000', 'p2000'
+                ])
+
+                if is_workstation:
+                    print(f"\n✅ NVIDIA Workstation GPU detected: {result.stdout.strip()}")
+                    print(f"   Parallel encoding fully supported (unlimited NVENC sessions)\n")
+                elif len(self.enabled_qualities) > 2:
+                    print(f"\n{'='*70}")
+                    print(f"⚠️  PERFORMANCE NOTICE: NVIDIA GeForce GPU Detected")
+                    print(f"{'='*70}")
+                    print(f"GPU: {result.stdout.strip()}")
+                    print(f"\nGeForce cards limit NVENC to 2-3 concurrent encoding sessions.")
+                    print(f"With {len(self.enabled_qualities)} qualities, encoding will be partially sequential.")
+                    print(f"\n💡 For maximum parallel speedup, consider:")
+                    print(f"   • --explicit-qualities=high,medium (only 2 qualities)")
+                    print(f"   • Or continue anyway (still faster than pure CPU!)")
+                    print(f"\n⏱️  Expected behavior:")
+                    print(f"   • 2 qualities will encode simultaneously")
+                    print(f"   • Remaining qualities will queue and encode when slots free")
+                    print(f"{'='*70}\n")
+
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                # Can't detect specific GPU, show generic warning
+                if len(self.enabled_qualities) > 2:
+                    print(f"\n⚠️  Note: NVIDIA consumer GPUs typically limit concurrent NVENC sessions to 2-3")
+                    print(f"   With {len(self.enabled_qualities)} qualities, parallel speedup may be limited\n")
+
+        elif self.hw_accel == 'videotoolbox':
+            if len(self.enabled_qualities) > 2:
+                print(f"\n{'='*70}")
+                print(f"⚠️  PERFORMANCE NOTICE: VideoToolbox Limitations")
+                print(f"{'='*70}")
+                print(f"VideoToolbox typically limits concurrent encoding sessions to 2-3.")
+                print(f"\n💡 For better performance, consider:")
+                print(f"   • --explicit-qualities=high,medium (only 2 qualities)")
+                print(f"   • Remove --parallel (sequential may be more efficient)")
+                print(f"{'='*70}\n")
+
+        elif self.hw_accel == 'vaapi':
+            print(f"\n💡 VAAPI parallel performance varies by GPU model")
+            print(f"   Monitor system resources during encoding\n")
+
+        elif self.hw_accel in ['qsv', 'amf']:
+            print(f"\n✅ {self.hw_accel.upper()} typically supports {len(self.enabled_qualities)} concurrent sessions well\n")
 
     def get_encoder_settings(self, profile: Dict) -> Tuple[str, List[str]]:
         """Get encoder and its settings based on hardware acceleration"""
@@ -220,7 +282,7 @@ class HLSConverter:
             return 'h264_vaapi', settings
 
         # Fallback to software
-        return self.get_encoder_settings(profile)[0], self.get_encoder_settings(profile)[1]
+        return self.get_encoder_settings({'preset': 'medium', 'crf': '23', 'use_advanced': False})
 
     def _determine_quality_ladder(self):
         """
@@ -897,6 +959,7 @@ class HLSConverter:
             print(f"⚡ Quality: BALANCED (medium/fast presets)")
         print(f"🎯 Qualities: {', '.join(self.enabled_qualities)}")
 
+        # Hardware acceleration detection
         if self.hw_accel == 'auto':
             detected_hw = self.detect_hardware_acceleration()
             if detected_hw:
@@ -907,7 +970,14 @@ class HLSConverter:
         elif self.hw_accel:
             print(f"🚀 Hardware Acceleration: {self.hw_accel.upper()}")
 
-        if self.parallel:
+        # Check parallel efficiency with hardware
+        if self.parallel and self.hw_accel:
+            self._check_parallel_efficiency()
+        elif self.parallel:
+            workers = min(len(self.enabled_qualities), cpu_count())
+            print(f"\n✅ CPU Parallel Processing: {workers} workers (excellent for CPU encoding)\n")
+
+        if self.parallel and not self.hw_accel:
             workers = min(len(self.enabled_qualities), cpu_count())
             print(f"⚡ Parallel Processing: {workers} workers")
 
@@ -940,10 +1010,11 @@ class HLSConverter:
             with Pool(processes=min(len(self.enabled_qualities), cpu_count())) as pool:
                 convert_func = partial(self._convert_video_wrapper,
                                       input_file=self.input_file,
-                                      output_dir=self.output_dir,
+                                      output_dir=str(self.output_dir),
                                       video_info=self.video_info,
                                       hw_accel=self.hw_accel,
-                                      best_quality=self.best_quality)
+                                      best_quality=self.best_quality,
+                                      enabled_qualities=self.enabled_qualities)
 
                 results = pool.map(convert_func,
                                   [(name, self.quality_profiles[name]) for name in self.enabled_qualities])
@@ -1010,7 +1081,7 @@ class HLSConverter:
         else:
             available = "Original → 720p → 480p"
 
-        generated = ' → '.join([f"{self.enabled_qualities[i]}" for i in range(len(self.enabled_qualities))])
+        generated = ' → '.join([self.enabled_qualities[i] for i in range(len(self.enabled_qualities))])
 
         print(f"\n💡 Available Qualities: {available}")
         print(f"   Generated: {generated}")
@@ -1036,15 +1107,21 @@ class HLSConverter:
         print("      • Lanczos scaling algorithm")
         print("="*70 + "\n")
 
-        return True
+        return video_success and audio_success
 
     @staticmethod
-    def _convert_video_wrapper(args, input_file, output_dir, video_info, hw_accel, best_quality):
+    def _convert_video_wrapper(args, input_file, output_dir, video_info, hw_accel, best_quality, enabled_qualities):
         """Wrapper for parallel video conversion"""
         profile_name, profile = args
 
         # Create a temporary converter instance for this process
-        temp_converter = HLSConverter(input_file, output_dir, best_quality=best_quality, hw_accel=hw_accel)
+        temp_converter = HLSConverter(
+            input_file,
+            output_dir,
+            best_quality=best_quality,
+            hw_accel=hw_accel,
+            explicit_qualities=enabled_qualities
+        )
         temp_converter.video_info = video_info
         temp_converter._determine_quality_ladder()
 
@@ -1060,24 +1137,32 @@ Examples:
   # Balanced mode with all 3 qualities (default)
   %(prog)s input.mkv output_dir/
 
-  # With hardware acceleration (auto-detect)
+  # With hardware acceleration (auto-detect) - RECOMMENDED
   %(prog)s input.mkv output_dir/ --hw-accel=auto
 
   # With NVIDIA hardware acceleration
   %(prog)s input.mkv output_dir/ --hw-accel=nvenc
 
-  # Parallel processing (encode all qualities simultaneously)
+  # CPU parallel processing (best for software encoding)
   %(prog)s input.mkv output_dir/ --parallel
 
-  # Maximum quality with hardware acceleration and parallel processing
-  %(prog)s input.mkv output_dir/ --best-quality --hw-accel=auto --parallel
+  # Maximum quality with hardware acceleration
+  %(prog)s input.mkv output_dir/ --best-quality --hw-accel=auto
+
+  # Hardware + parallel (auto-detects efficiency)
+  %(prog)s input.mkv output_dir/ --hw-accel=auto --parallel
 
   # Generate only high quality with NVIDIA GPU
   %(prog)s input.mkv output_dir/ --explicit-qualities=high --hw-accel=nvenc
 
+  # Two qualities with parallel (optimal for GeForce GPUs)
+  %(prog)s input.mkv output_dir/ --explicit-qualities=high,medium --hw-accel=nvenc --parallel
+
 Hardware Acceleration:
-  auto:          Auto-detect best available (recommended)
+  auto:          Auto-detect best available (RECOMMENDED)
   nvenc:         NVIDIA GPU (h264_nvenc) - 5-10x faster
+                 GeForce: 2-3 concurrent sessions
+                 Quadro/Tesla: Unlimited sessions
   qsv:           Intel Quick Sync (h264_qsv) - 3-5x faster
   videotoolbox:  Apple VideoToolbox (macOS) - 3-5x faster
   amf:           AMD GPU (h264_amf) - 5-8x faster
@@ -1089,8 +1174,18 @@ Quality Modes:
 
 Parallel Processing:
   --parallel:    Encode multiple qualities simultaneously
-                 Uses up to N CPU cores (N = number of qualities)
-                 Can reduce total encoding time by 50-70%
+                 • Best for: CPU encoding (no HW accel)
+                 • Good for: Workstation GPUs, Intel QSV, AMD AMF
+                 • Limited: Consumer NVIDIA (GeForce), VideoToolbox
+
+                 Script will automatically warn if parallel won't help!
+
+Performance Tips:
+  • Fastest single file:    --hw-accel=auto --explicit-qualities=high
+  • Best CPU utilization:   --parallel (no hw-accel)
+  • GeForce optimal:        --hw-accel=nvenc --explicit-qualities=high,medium --parallel
+  • Workstation GPU:        --hw-accel=nvenc --parallel (all qualities)
+  • Maximum quality:        --best-quality --hw-accel=auto
         """
     )
 
@@ -1104,7 +1199,7 @@ Parallel Processing:
                         choices=['auto', 'nvenc', 'qsv', 'videotoolbox', 'amf', 'vaapi'],
                         help='Hardware acceleration method (auto-detect or specify)')
     parser.add_argument('--parallel', '-p', action='store_true',
-                        help='Encode multiple qualities in parallel (faster)')
+                        help='Encode multiple qualities in parallel (auto-checks efficiency)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
 
     args = parser.parse_args()
@@ -1125,6 +1220,7 @@ Parallel Processing:
             print(f"   Valid options: high, medium, low")
             sys.exit(1)
 
+        # Remove duplicates while preserving order
         seen = set()
         explicit_qualities = [q for q in explicit_qualities if not (q in seen or seen.add(q))]
 
