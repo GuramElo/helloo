@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>hls.js Custom Controls (Manual Subtitles)</title>
+    <title>HLS Player with Stable Subtitles</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         body {
@@ -21,11 +21,12 @@
             width: 100%;
             display: block;
         }
-        /* Style native captions */
         video::cue {
-            background-color: rgba(0, 0, 0, 0.75);
+            background-color: rgba(0, 0, 0, 0.8);
             color: white;
-            font-size: 1.1rem;
+            font-size: 1.2rem;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
         }
         .custom-controls {
             padding: 10px;
@@ -40,152 +41,281 @@
             align-items: center;
             gap: 5px;
         }
+        select {
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #555;
+            background: #333;
+            color: white;
+            cursor: pointer;
+        }
+        select:hover {
+            background: #444;
+        }
+        .status {
+            padding: 10px;
+            background: #333;
+            color: #aaa;
+            text-align: center;
+            font-size: 0.9rem;
+        }
     </style>
 </head>
 <body>
 
-    <h1>hls.js Custom Controls Demo (Manual Subtitles)</h1>
+<h1>🎬 HLS Player with Native Subtitles</h1>
 
-    <div id="video-container">
-        <video id="video" controls crossOrigin="anonymous"></video>
-        
-        <div class="custom-controls">
-            <div class="control-group">
-                <label for="quality-select">Quality:</label>
-                <select id="quality-select"></select>
-            </div>
-            <div class="control-group">
-                <label for="audio-select">Audio:</label>
-                <select id="audio-select"></select>
-            </div>
-            <div class="control-group">
-                <label for="subtitle-select">Subtitles:</label>
-                <select id="subtitle-select"></select>
-            </div>
+<div id="video-container">
+    <video id="video" controls crossorigin="anonymous">
+        <!-- Subtitle tracks will be added here dynamically -->
+    </video>
+
+    <div class="custom-controls">
+        <div class="control-group">
+            <label for="quality-select">Quality:</label>
+            <select id="quality-select"></select>
+        </div>
+        <div class="control-group">
+            <label for="audio-select">Audio:</label>
+            <select id="audio-select"></select>
+        </div>
+        <div class="control-group">
+            <label for="subtitle-select">Subtitles:</label>
+            <select id="subtitle-select">
+                <option value="-1">Loading...</option>
+            </select>
         </div>
     </div>
+    <div class="status" id="status">Initializing...</div>
+</div>
 
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const video = document.getElementById('video');
-            const streamUrl = 'http://localhost:3001/master.m3u8';
+<script>
+    document.addEventListener('DOMContentLoaded', async () => {
+        const video = document.getElementById('video');
+        const streamUrl = 'http://localhost:3001/master.m3u8';
+        const subtitlesJsonUrl = 'http://localhost:3001/subtitles.json';
 
-            const qualitySelect = document.getElementById('quality-select');
-            const audioSelect = document.getElementById('audio-select');
-            const subtitleSelect = document.getElementById('subtitle-select');
+        const qualitySelect = document.getElementById('quality-select');
+        const audioSelect = document.getElementById('audio-select');
+        const subtitleSelect = document.getElementById('subtitle-select');
+        const status = document.getElementById('status');
 
-            if (Hls.isSupported()) {
-                const hls = new Hls({
-                    // 3. --- DISABLE hls.js subtitle management ---
-                    // This is the key. We will handle it ourselves.
-                    subtitleDisplay: false
-                });
+        let hls = null;
 
-                hls.loadSource(streamUrl);
-                hls.attachMedia(video);
+        // === STEP 1: Load subtitles FIRST (independently of HLS) ===
+        await loadSubtitles();
 
-                // --- Quality and Audio (Unchanged) ---
-                hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-                    qualitySelect.innerHTML = ''; 
-                    const autoOption = document.createElement('option');
-                    autoOption.value = -1;
-                    autoOption.innerText = 'Auto';
-                    qualitySelect.appendChild(autoOption);
-                    data.levels.forEach((level, index) => {
-                        const option = document.createElement('option');
-                        option.value = index;
-                        option.innerText = level.height ? `${level.height}p` : `~${Math.round(level.bitrate / 1000)}kbps`;
-                        qualitySelect.appendChild(option);
-                    });
-                });
+        // === STEP 2: Initialize HLS video/audio ===
+        if (Hls.isSupported()) {
+            hls = new Hls({
+                debug: false,
+                enableWorker: true,
+                // CRITICAL: Disable all hls.js subtitle handling
+                subtitleDisplay: false,
+                renderTextTracksNatively: false,
+            });
 
-                hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
-                    audioSelect.innerHTML = ''; 
-                    data.audioTracks.forEach((track, index) => {
-                        const option = document.createElement('option');
-                        option.value = index;
-                        option.innerText = track.name || track.lang || `Track ${index}`;
-                        if (track.default) option.selected = true;
-                        audioSelect.appendChild(option);
-                    });
-                    hls.audioTrack = Number(audioSelect.value);
-                });
+            hls.loadSource(streamUrl);
+            hls.attachMedia(video);
 
+            // Quality selection
+            hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+                console.log('✅ HLS Manifest parsed');
+                status.textContent = 'Ready to play';
 
-                // --- 4. MANUAL SUBTITLE HANDLING ---
-                hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (event, data) => {
-                    // Clear previous tracks and dropdown options
-                    subtitleSelect.innerHTML = '';
-                    
-                    // Remove any old <track> elements we may have added
-                    Array.from(video.querySelectorAll('track')).forEach(t => t.remove());
-
-                    const offOption = document.createElement('option');
-                    offOption.value = -1;
-                    offOption.innerText = 'Off';
-                    subtitleSelect.appendChild(offOption);
-
-                    data.subtitleTracks.forEach((track, index) => {
-                        // Create the <option> for our dropdown
-                        const option = document.createElement('option');
-                        option.value = index; // Use index as the value
-                        option.innerText = track.name || track.lang || `Subtitle ${index}`;
-                        if (track.default) option.selected = true;
-                        subtitleSelect.appendChild(option);
-
-                        // --- Create the manual <track> element ---
-                        const trackElement = document.createElement('track');
-                        trackElement.kind = 'subtitles';
-                        trackElement.label = track.name || `Subtitle ${index}`;
-                        trackElement.srclang = track.lang || '';
-                        trackElement.src = track.url; // The direct URL to the .vtt file
-                        
-                        // Set its mode to 'hidden' by default
-                        trackElement.mode = 'hidden';
-                        
-                        // Add it to the video element
-                        video.appendChild(trackElement);
-                    });
-                    
-                    // After adding all tracks, set the default one
-                    updateSubtitleDisplay();
-                });
-
-                function updateSubtitleDisplay() {
-                    const selectedIndex = Number(subtitleSelect.value);
-
-                    // Loop through the video's NATIVE textTracks list
-                    // This list is now populated by our manual <track> elements.
-                    for (let i = 0; i < video.textTracks.length; i++) {
-                        // hls.js tracks will be in here, but also our manual ones.
-                        // We check the label to be sure, or just the index.
-                        // The manual tracks we added should appear in the same order.
-                        if (i === selectedIndex) {
-                            video.textTracks[i].mode = 'showing';
-                        } else {
-                            video.textTracks[i].mode = 'hidden';
-                        }
-                    }
+                // Disable hls.js subtitle track
+                if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
+                    hls.subtitleTrack = -1;
                 }
 
-                // --- 5. EVENT LISTENERS ---
-                // This now controls the native video.textTracks
-                subtitleSelect.addEventListener('change', updateSubtitleDisplay);
-                
-                // These control hls.js
-                qualitySelect.addEventListener('change', (event) => {
-                    hls.currentLevel = Number(event.target.value);
+                qualitySelect.innerHTML = '';
+                const autoOption = document.createElement('option');
+                autoOption.value = -1;
+                autoOption.innerText = 'Auto';
+                qualitySelect.appendChild(autoOption);
+
+                data.levels.forEach((level, index) => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.innerText = level.height ? `${level.height}p` : `~${Math.round(level.bitrate / 1000)}kbps`;
+                    qualitySelect.appendChild(option);
+                });
+            });
+
+            // Audio track selection
+            hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+                console.log('🔊 Audio tracks updated:', data.audioTracks.length);
+
+                audioSelect.innerHTML = '';
+                data.audioTracks.forEach((track, index) => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.innerText = track.name || track.lang || `Track ${index}`;
+                    if (track.default) option.selected = true;
+                    audioSelect.appendChild(option);
+                });
+                hls.audioTrack = Number(audioSelect.value);
+            });
+
+            // IMPORTANT: Just detect subtitle tracks but don't use them
+            hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (event, data) => {
+                console.log('ℹ️ HLS subtitle tracks detected (will be ignored):', data.subtitleTracks.length);
+                // Immediately disable
+                hls.subtitleTrack = -1;
+            });
+
+            // Event listeners
+            qualitySelect.addEventListener('change', (event) => {
+                hls.currentLevel = Number(event.target.value);
+            });
+
+            audioSelect.addEventListener('change', (event) => {
+                hls.audioTrack = Number(event.target.value);
+            });
+
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            // Native HLS support (Safari)
+            video.src = streamUrl;
+            status.textContent = 'Using native HLS (Safari)';
+            console.log('🍎 Using native HLS support');
+        }
+
+        // === SUBTITLE FUNCTIONS ===
+        async function loadSubtitles() {
+            try {
+                status.textContent = 'Loading subtitles...';
+                const response = await fetch(subtitlesJsonUrl);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                console.log('📝 Subtitles manifest loaded:', data);
+
+                if (!data.subtitles || data.subtitles.length === 0) {
+                    console.log('⚠️ No subtitles available');
+                    setupSubtitleSelect([]);
+                    return;
+                }
+
+                // Add subtitle tracks to video element
+                data.subtitles.forEach((subtitle, index) => {
+                    const track = document.createElement('track');
+                    track.kind = 'subtitles';
+                    track.label = subtitle.title;
+                    track.srclang = subtitle.language;
+                    track.src = `http://localhost:3001/${subtitle.file}`;
+
+                    // First subtitle is default
+                    if (index === 0) {
+                        track.default = true;
+                    }
+
+                    video.appendChild(track);
+                    console.log(`✅ Added subtitle: ${subtitle.title} (${subtitle.language})`);
                 });
 
-                audioSelect.addEventListener('change', (event) => {
-                    hls.audioTrack = Number(event.target.value);
-                });
+                setupSubtitleSelect(data.subtitles);
 
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = streamUrl;
-                console.log('Using native HLS support.');
+            } catch (error) {
+                console.error('❌ Failed to load subtitles:', error);
+                setupSubtitleSelect([]);
+            }
+        }
+
+        function setupSubtitleSelect(subtitles) {
+            subtitleSelect.innerHTML = '';
+
+            // "Off" option
+            const offOption = document.createElement('option');
+            offOption.value = -1;
+            offOption.innerText = 'Off';
+            subtitleSelect.appendChild(offOption);
+
+            // Add each subtitle
+            subtitles.forEach((subtitle, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.innerText = `${subtitle.title} (${subtitle.language})`;
+
+                // Select first subtitle by default
+                if (index === 0) {
+                    option.selected = true;
+                }
+
+                subtitleSelect.appendChild(option);
+            });
+
+            // Handle subtitle selection changes
+            subtitleSelect.addEventListener('change', updateSubtitleDisplay);
+
+            // Initialize display after a short delay
+            setTimeout(() => {
+                updateSubtitleDisplay();
+            }, 500);
+        }
+
+        function updateSubtitleDisplay() {
+            const selectedIndex = Number(subtitleSelect.value);
+            console.log(`🎬 Subtitle selection changed to: ${selectedIndex}`);
+
+            // Make sure hls.js subtitles stay disabled
+            if (hls && hls.subtitleTrack !== undefined) {
+                hls.subtitleTrack = -1;
+            }
+
+            // Update all native text tracks
+            for (let i = 0; i < video.textTracks.length; i++) {
+                const track = video.textTracks[i];
+
+                if (i === selectedIndex) {
+                    track.mode = 'showing';
+                    console.log(`✅ Showing: ${track.label}`);
+                } else {
+                    track.mode = 'hidden';
+                }
+            }
+
+            // If "Off" selected, hide all
+            if (selectedIndex === -1) {
+                for (let track of video.textTracks) {
+                    track.mode = 'hidden';
+                }
+                console.log('🚫 All subtitles hidden');
+            }
+        }
+
+        // Debug: Monitor subtitle cues
+        video.addEventListener('loadedmetadata', () => {
+            console.log('📊 Video metadata loaded');
+            console.log(`   Text tracks available: ${video.textTracks.length}`);
+
+            // Ensure hls.js doesn't interfere
+            if (hls && hls.subtitleTrack !== undefined) {
+                hls.subtitleTrack = -1;
+            }
+
+            // Add cue change listeners for debugging
+            for (let i = 0; i < video.textTracks.length; i++) {
+                const track = video.textTracks[i];
+                track.addEventListener('cuechange', () => {
+                    if (track.mode === 'showing' && track.activeCues && track.activeCues.length > 0) {
+                        console.log(`💬 Active cue: "${track.activeCues[0].text}"`);
+                    }
+                });
             }
         });
-    </script>
+
+        video.addEventListener('play', () => {
+            console.log('▶️ Video playing');
+        });
+
+        video.addEventListener('error', (e) => {
+            console.error('❌ Video error:', e);
+            status.textContent = 'Error loading video';
+        });
+    });
+</script>
 </body>
 </html>

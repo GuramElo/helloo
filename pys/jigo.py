@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-HLS Video Converter with Proper Multi-Audio and Subtitle Support
+HLS Video Converter with Stable Subtitle Support
 Converts MKV/MP4 files to HLS format with multiple quality variants,
-separate audio tracks, and subtitle support.
+separate audio tracks, and native browser-compatible subtitles.
 
-CORRECTED VERSION 2: Uses the 'segment' muxer for robust subtitle conversion.
+VERSION 4: Subtitles are completely separate from HLS (most stable approach)
 """
 
 import os
@@ -32,34 +32,17 @@ class HLSConverter:
                 'bufsize': '7500k',
                 'crf': '19',
             },
-            # 'medium': {
-            #     'name': 'medium',
-            #     'height': 720,
-            #     'video_bitrate': '2800k',
-            #     'maxrate': '2996k',
-            #     'bufsize': '4200k',
-            #     'crf': '21',
-            # },
-            # 'low': {
-            #     'name': 'low',
-            #     'height': 480,
-            #     'video_bitrate': '1400k',
-            #     'maxrate': '1498k',
-            #     'bufsize': '2100k',
-            #     'crf': '23',
-            # }
         }
 
         # Audio profiles
         self.audio_profiles = {
             'high': {'bitrate': '192k', 'sample_rate': '48000'},
-            # 'medium': {'bitrate': '128k', 'sample_rate': '48000'},
-            # 'low': {'bitrate': '96k', 'sample_rate': '48000'},
         }
 
         self.video_info = None
         self.audio_streams = []
         self.subtitle_streams = []
+        self.converted_subtitles = []  # Track successfully converted subtitles
 
     def check_ffmpeg(self) -> bool:
         """Check if ffmpeg and ffprobe are available"""
@@ -125,7 +108,6 @@ class HLSConverter:
                     lang = stream.get('tags', {}).get('language', 'und')
                     title = stream.get('tags', {}).get('title', '')
 
-                    # Create a better default title
                     if not title:
                         if lang != 'und':
                             title = f"{lang.upper()}"
@@ -147,7 +129,6 @@ class HLSConverter:
                     lang = stream.get('tags', {}).get('language', 'und')
                     title = stream.get('tags', {}).get('title', '')
 
-                    # Create a better default title
                     if not title:
                         if lang != 'und':
                             title = f"{lang.upper()}"
@@ -214,24 +195,21 @@ class HLSConverter:
         source_height = self.video_info['height']
         source_width = self.video_info['width']
 
-        # Don't upscale
         if target_height >= source_height:
             target_height = source_height
             target_width = source_width
         else:
-            # Calculate width maintaining aspect ratio
             aspect_ratio = source_width / source_height
             target_width = int(target_height * aspect_ratio)
 
-        # Make sure dimensions are even (required for h264)
         target_width = target_width if target_width % 2 == 0 else target_width - 1
         target_height = target_height if target_height % 2 == 0 else target_height - 1
 
         return f"{target_width}:{target_height}", target_width, target_height
 
     def convert_subtitles(self):
-        """Convert subtitles to segmented WebVTT format using the segment muxer."""
-        print("\n📝 Converting subtitles to HLS (Segmented WebVTT)...")
+        """Convert subtitles to standalone WebVTT files (NOT in HLS manifest)"""
+        print("\n📝 Converting subtitles to standalone WebVTT files...")
 
         if not self.subtitle_streams:
             print("   ⚠️  No subtitle streams detected to convert")
@@ -243,9 +221,9 @@ class HLSConverter:
 
         for i, subtitle in enumerate(self.subtitle_streams):
             safe_lang = re.sub(r'[^\w\-]', '_', subtitle['language'])
-            
-            output_playlist = self.output_dir / f"subtitle_{i}_{safe_lang}.m3u8"
-            segment_filename_pattern = self.output_dir / f"subtitle_{i}_{safe_lang}_%04d.vtt"
+            safe_title = re.sub(r'[^\w\-\s]', '_', subtitle['title'])
+
+            output_vtt = self.output_dir / f"subtitle_{i}_{safe_lang}.vtt"
             codec = subtitle['codec'].lower()
 
             print(f"\n   [{i}] Processing: {subtitle['title']} ({subtitle['language']})")
@@ -256,47 +234,70 @@ class HLSConverter:
                 skipped_count += 1
                 continue
 
-            # This command uses the 'segment' muxer which is the correct tool for this job.
             cmd = [
                 'ffmpeg',
                 '-v', 'warning',
                 '-i', self.input_file,
                 '-map', f"0:{subtitle['index']}",
-                '-c:s', 'webvtt',                  # Ensure output codec is WebVTT
-                '-f', 'segment',                   # Use the segment muxer
-                '-segment_time', '10',             # Create 10-second segments
-                '-segment_list', str(output_playlist), # The output M3U8 playlist
-                '-segment_list_type', 'm3u8',      # The type of playlist to generate
+                '-c:s', 'webvtt',
                 '-y',
-                str(segment_filename_pattern)      # The pattern for the segment files
+                str(output_vtt)
             ]
 
             try:
-                subprocess.run(cmd,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE,
-                               check=True,
-                               timeout=180)
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                    timeout=180
+                )
 
-                if output_playlist.exists() and output_playlist.stat().st_size > 50:
-                    print(f"       ✅ Successfully converted to HLS format.")
+                if output_vtt.exists() and output_vtt.stat().st_size > 10:
+                    size_kb = output_vtt.stat().st_size / 1024
+                    print(f"       ✅ Successfully converted ({size_kb:.1f} KB)")
                     converted_count += 1
+
+                    # Store info about successfully converted subtitle
+                    self.converted_subtitles.append({
+                        'file': output_vtt.name,
+                        'language': subtitle['language'],
+                        'title': subtitle['title'],
+                        'index': i
+                    })
                 else:
-                    print(f"       ❌ Conversion failed: output playlist is empty.")
+                    print(f"       ❌ Conversion failed: output file is empty or missing")
                     skipped_count += 1
 
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                error_msg = e.stderr.decode('utf-8', errors='ignore') if hasattr(e, 'stderr') else str(e)
-                print(f"       ❌ Conversion failed for subtitle stream #{i}.")
-                print(f"          Error: {error_msg[:250]}")
+            except subprocess.TimeoutExpired:
+                print(f"       ❌ Conversion timed out (>180 seconds)")
                 skipped_count += 1
-        
+            except subprocess.CalledProcessError as e:
+                error_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
+                print(f"       ❌ Conversion failed.")
+                print(f"          Error: {error_msg[:200]}")
+                skipped_count += 1
+
         print(f"\n   {'='*66}")
         print(f"   📊 Subtitle Conversion Summary:")
         print(f"      ✅ Converted: {converted_count}")
         print(f"      ❌ Skipped:   {skipped_count}")
         print(f"   {'='*66}")
 
+    def create_subtitle_manifest(self):
+        """Create a JSON manifest file with subtitle information"""
+        if not self.converted_subtitles:
+            return
+
+        manifest_file = self.output_dir / "subtitles.json"
+
+        with open(manifest_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'subtitles': self.converted_subtitles
+            }, f, indent=2, ensure_ascii=False)
+
+        print(f"\n   ✓ Subtitle manifest created: {manifest_file}")
+        print(f"      Contains {len(self.converted_subtitles)} subtitle track(s)")
 
     def convert_audio_track(self, audio_index: int, audio_stream: Dict, quality: str) -> bool:
         """Convert a single audio track to AAC for a specific quality"""
@@ -313,7 +314,7 @@ class HLSConverter:
             '-c:a', 'aac',
             '-b:a', profile['bitrate'],
             '-ar', profile['sample_rate'],
-            '-ac', '2',  # Stereo
+            '-ac', '2',
             '-f', 'hls',
             '-hls_time', '6',
             '-hls_playlist_type', 'vod',
@@ -339,7 +340,6 @@ class HLSConverter:
         scale, width, height = self._calculate_scale(profile['height'])
         output_name = f"video_{profile_name}"
 
-        # Video-only encoding
         cmd = [
             'ffmpeg',
             '-i', self.input_file,
@@ -356,7 +356,7 @@ class HLSConverter:
             '-keyint_min', str(int(self.video_info['fps'])),
             '-sc_threshold', '0',
             '-pix_fmt', 'yuv420p',
-            '-an',  # No audio in video-only stream
+            '-an',
             '-f', 'hls',
             '-hls_time', '6',
             '-hls_playlist_type', 'vod',
@@ -379,10 +379,8 @@ class HLSConverter:
                 universal_newlines=True
             )
 
-            # Monitor progress
             for line in process.stderr:
                 if 'frame=' in line:
-                    # Extract and display progress
                     print(f"   {line.strip()}\r", end='', flush=True)
 
             process.wait()
@@ -411,7 +409,7 @@ class HLSConverter:
         success = True
         for i, audio in enumerate(self.audio_streams):
             print(f"\n📻 Audio Track #{i}: {audio['title']} ({audio['language']})")
-            for quality in ['high']: #, 'medium', 'low'
+            for quality in ['high']:
                 if not self.convert_audio_track(i, audio, quality):
                     success = False
                     print(f"   ⚠️  Warning: Audio {i} ({quality}) conversion failed")
@@ -419,7 +417,7 @@ class HLSConverter:
         return success
 
     def create_master_playlist(self):
-        """Create master playlist with all variants, audio tracks, and subtitles"""
+        """Create master playlist (WITHOUT subtitle references - subtitles are separate)"""
         print("\n📋 Creating master playlist...")
 
         master_file = self.output_dir / "master.m3u8"
@@ -434,8 +432,7 @@ class HLSConverter:
                 for i, audio in enumerate(self.audio_streams):
                     safe_lang = re.sub(r'[^\w\-]', '_', audio['language'])
 
-                    # Check if audio files exist before adding
-                    for quality_level in ['high']: #, 'medium', 'low'
+                    for quality_level in ['high']:
                         audio_file = self.output_dir / f"audio_{i}_{safe_lang}_{quality_level}.m3u8"
                         if audio_file.exists():
                             f.write(f'#EXT-X-MEDIA:TYPE=AUDIO,')
@@ -449,35 +446,12 @@ class HLSConverter:
 
                 f.write("\n")
 
-            # Subtitle declarations - only include playlists that exist
-            has_subtitles = False
-            if self.subtitle_streams:
-                f.write("# Subtitles\n")
-                subtitle_index = 0
-                for i, subtitle in enumerate(self.subtitle_streams):
-                    safe_lang = re.sub(r'[^\w\-]', '_', subtitle['language'])
-                    subtitle_playlist_file = f"subtitle_{i}_{safe_lang}.m3u8"
-                    subtitle_path = self.output_dir / subtitle_playlist_file
-
-                    # Only add subtitle if its M3U8 playlist exists and has content
-                    if subtitle_path.exists() and subtitle_path.stat().st_size > 50:
-                        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,')
-                        f.write(f'GROUP-ID="subs",')
-                        f.write(f'NAME="{subtitle["title"]}",')
-                        f.write(f'LANGUAGE="{subtitle["language"]}",')
-                        f.write(f'DEFAULT={"YES" if subtitle_index == 0 else "NO"},')
-                        f.write(f'AUTOSELECT={"YES" if subtitle_index == 0 else "NO"},')
-                        f.write(f'FORCED=NO,')
-                        f.write(f'URI="{subtitle_playlist_file}"\n')
-                        has_subtitles = True
-                        subtitle_index += 1
-
-                if has_subtitles:
-                    f.write("\n")
+            # NOTE: NO subtitle references in HLS manifest
+            # Subtitles are handled separately via subtitles.json
 
             # Video variants
             f.write("# Video variants\n")
-            for profile_name in ['high']: #, 'medium', 'low'
+            for profile_name in ['high']:
                 profile = self.quality_profiles[profile_name]
                 audio_profile = self.audio_profiles[profile_name]
                 scale, width, height = self._calculate_scale(profile['height'])
@@ -485,7 +459,6 @@ class HLSConverter:
                 video_playlist = f"video_{profile_name}.m3u8"
 
                 if (self.output_dir / video_playlist).exists():
-                    # Calculate bandwidth
                     video_bw = int(profile['video_bitrate'].replace('k', '000'))
                     audio_bw = int(audio_profile['bitrate'].replace('k', '000'))
                     total_bandwidth = video_bw + audio_bw
@@ -500,117 +473,55 @@ class HLSConverter:
                     if self.audio_streams:
                         f.write(f',AUDIO="audio-{profile_name}"')
 
-                    if has_subtitles:
-                        f.write(',SUBTITLES="subs"')
-
+                    # NO subtitle reference here
                     f.write(f'\n{video_playlist}\n')
 
         print(f"   ✓ Master playlist created: {master_file}")
-
-        # Verify subtitle files
-        if self.subtitle_streams:
-            print("\n🔍 Verifying subtitle files...")
-            subtitle_count = 0
-            for i, subtitle in enumerate(self.subtitle_streams):
-                safe_lang = re.sub(r'[^\w\-]', '_', subtitle['language'])
-                subtitle_file = self.output_dir / f"subtitle_{i}_{safe_lang}.m3u8"
-                if subtitle_file.exists() and subtitle_file.stat().st_size > 50:
-                    size_kb = subtitle_file.stat().st_size / 1024
-                    print(f"   ✓ {subtitle_file.name} (Playlist, {size_kb:.1f} KB)")
-                    subtitle_count += 1
-                else:
-                    # Don't print "not created" for image-based subs that were intentionally skipped
-                    codec = subtitle['codec'].lower()
-                    image_based_codecs = ['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvdsub', 'pgssub', 'pgs']
-                    if codec not in image_based_codecs:
-                        print(f"   ✗ {subtitle_file.name} (not created)")
-
-            if subtitle_count == 0 and len(self.subtitle_streams) > 0:
-                print(f"   ⚠️  No subtitle files were successfully created")
-
-        # Verify other files
-        print("\n🔍 Verifying video and audio files...")
-        missing_files = []
-
-        # Check video files
-        for profile_name in ['high']: #, 'medium', 'low'
-            video_file = self.output_dir / f"video_{profile_name}.m3u8"
-            if not video_file.exists():
-                missing_files.append(str(video_file))
-            else:
-                print(f"   ✓ video_{profile_name}.m3u8")
-
-        # Check audio files
-        if self.audio_streams:
-            for i, audio in enumerate(self.audio_streams):
-                safe_lang = re.sub(r'[^\w\-]', '_', audio['language'])
-                for quality in ['high']: #, 'medium', 'low'
-                    audio_file = self.output_dir / f"audio_{i}_{safe_lang}_{quality}.m3u8"
-                    if not audio_file.exists():
-                        missing_files.append(str(audio_file))
-
-        if missing_files:
-            print("\n⚠️  Warning: Some files are missing:")
-            for f in missing_files[:5]:
-                print(f"   - {f}")
-            if len(missing_files) > 5:
-                print(f"   ... and {len(missing_files) - 5} more")
-        else:
-            print("   ✓ All required files verified")
-
         return str(master_file)
 
     def convert(self) -> bool:
         """Main conversion process"""
         print("\n" + "="*70)
-        print(" "*20 + "🎥 HLS VIDEO CONVERTER")
+        print(" "*15 + "🎥 HLS VIDEO CONVERTER (Stable Subtitles)")
         print("="*70)
         print(f"📁 Input:  {self.input_file}")
         print(f"📁 Output: {self.output_dir}")
         print("="*70)
 
-        # Check ffmpeg
         if not self.check_ffmpeg():
             return False
 
-        # Probe file
         if not self.probe_file():
             return False
 
-        # Convert subtitles first (fast)
+        # Convert subtitles first
         if self.subtitle_streams:
             self.convert_subtitles()
+            self.create_subtitle_manifest()
         else:
             print("\n⚠️  No subtitles detected in source file")
 
-        # Convert all video quality variants
+        # Convert video
         print(f"\n{'='*70}")
         print("PHASE 1: Converting Video Streams")
         print(f"{'='*70}")
 
         video_success = True
-        for profile_name in ['high']: #, 'medium', 'low'
+        for profile_name in ['high']:
             if not self.convert_video_quality_variant(profile_name, self.quality_profiles[profile_name]):
                 video_success = False
-                print(f"⚠️  Warning: {profile_name} video conversion failed")
 
-        # Convert all audio tracks
+        # Convert audio
         print(f"\n{'='*70}")
         print("PHASE 2: Converting Audio Streams")
         print(f"{'='*70}")
 
         audio_success = self.convert_all_audio_tracks()
 
-        if not video_success or not audio_success:
-            print("\n⚠️  Some conversions failed, but continuing...")
-
         # Create master playlist
         master_playlist = self.create_master_playlist()
 
         # Summary
-        subtitle_count = len([f for f in self.output_dir.glob("subtitle_*.m3u8")
-                              if f.stat().st_size > 50])
-
         print("\n" + "="*70)
         print(" "*20 + "✅ CONVERSION COMPLETED!")
         print("="*70)
@@ -618,11 +529,15 @@ class HLSConverter:
         print(f"🎬 Master playlist:     {master_playlist}")
         print(f"📺 Video qualities:     1 (high: 1080p)")
         print(f"🔊 Audio tracks:        {len(self.audio_streams)}")
-        print(f"💬 Subtitle tracks:     {subtitle_count}/{len(self.subtitle_streams)} converted")
+        print(f"💬 Subtitle tracks:     {len(self.converted_subtitles)} converted")
+        if self.converted_subtitles:
+            print(f"📄 Subtitle manifest:   subtitles.json")
+            print(f"   Subtitles are SEPARATE from HLS (native browser rendering)")
         print("="*70)
-        print("\n💡 Next Steps:")
-        print(f"   1. Serve files from: {self.output_dir}")
-        print(f"   2. Point player to:  master.m3u8")
+        print("\n💡 Implementation Notes:")
+        print("   • Subtitles are NOT in HLS manifest (better compatibility)")
+        print("   • Use subtitles.json to load subtitle tracks in HTML")
+        print("   • Subtitles render via native HTML5 <track> elements")
         print("="*70 + "\n")
 
         return True
@@ -630,27 +545,7 @@ class HLSConverter:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert MKV/MP4 to HLS with multiple audio tracks and subtitles',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s input.mkv output_dir
-  %(prog)s /path/to/movie.mp4 /var/www/html/streams/movie
-
-Output structure:
-  - master.m3u8 (main playlist)
-  - video_high.m3u8, video_medium.m3u8, etc. (video stream playlists)
-  - audio_0_eng_high.m3u8, etc. (audio stream playlists)
-  - subtitle_0_eng.m3u8, etc. (subtitle playlists)
-  - various .ts and .vtt segment files
-
-Features:
-  ✓ Preserves all audio tracks with separate streams
-  ✓ Converts all text-based subtitles to WebVTT for HLS
-  ✓ Creates multiple quality levels (configurable in script)
-  ✓ Proper HLS structure for browser compatibility
-  ✓ Detailed progress monitoring and error reporting
-        """
+        description='Convert MKV/MP4 to HLS with stable subtitle support',
     )
 
     parser.add_argument('input', help='Input video file (MKV or MP4)')
@@ -659,13 +554,11 @@ Features:
 
     args = parser.parse_args()
 
-    # Validate input file
     if not os.path.isfile(args.input):
         print(f"❌ ERROR: Input file does not exist: {args.input}")
         sys.exit(1)
 
-    # Validate file extension
-    valid_extensions = ['.mkv', '.mp4', 'avi', '.mov', '.m4v', '.webm']
+    valid_extensions = ['.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm']
     file_ext = os.path.splitext(args.input)[1].lower()
     if file_ext not in valid_extensions:
         print(f"⚠️  WARNING: File extension '{file_ext}' may not be supported")
@@ -674,7 +567,6 @@ Features:
         if response.lower() != 'y':
             sys.exit(1)
 
-    # Create converter and run
     converter = HLSConverter(args.input, args.output)
 
     try:
